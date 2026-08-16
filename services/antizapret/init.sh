@@ -30,6 +30,8 @@ IPS_WORLD_URL='${IPS_WORLD_URL:-""}'
 ASN_URL='${ASN_URL:-""}'
 ASN_WORLD_URL='${ASN_WORLD_URL:-""}'
 AZ_SUBNET=${AZ_SUBNET:-"14.16.0.0/15"}
+AZ_SUBNET_V6=${AZ_SUBNET_V6:-"fdcc:ad94:bacf:61a4::/64"}
+AZ_FAKE_IPV6_SUBNET=${AZ_FAKE_IPV6_SUBNET:-"fdcc:ad94:bacf:61a5::/64"}
 LC_ALL=C.UTF-8
 EOF
 source /etc/default/antizapret
@@ -39,6 +41,18 @@ ln -sf /etc/default/antizapret /etc/profile.d/antizapret.sh
 
 # creating custom hosts files if they have not yet been initialized
 for file in $(echo {exclude,include}-{hosts,ips,ips-world,asn,asn-world}-custom.txt); do
+    path=/root/antizapret/config/custom/$file
+    [ ! -f $path ] && touch $path
+done
+
+# creating custom IPv6 hosts files if they have not yet been initialized
+for file in $(echo {exclude,include}-{hosts-v6,hosts-v6-world}-custom.txt); do
+    path=/root/antizapret/config/custom/$file
+    [ ! -f $path ] && touch $path
+done
+
+# creating custom ASN IPv6 files if they have not yet been initialized
+for file in $(echo {exclude,include}-{asn-v6,asn-v6-world}-custom.txt); do
     path=/root/antizapret/config/custom/$file
     [ ! -f $path ] && touch $path
 done
@@ -88,6 +102,23 @@ for eth in $(ip link | grep -oE "eth[0-9]"); do
     iptables -t nat -A POSTROUTING -o "$eth" -j MASQUERADE
 done
 
+# Prepare ip6tables for IPv6 support
+if [ "$DISABLE_IPV6" != "true" ]; then
+    ip6tables -t nat -N "$CHAIN" 2>/dev/null || true
+    ip6tables -t nat -A PREROUTING -d "${AZ_SUBNET_V6:-fdcc:ad94:bacf:61a4::/64}" -j "$CHAIN" 2>/dev/null || true
+    ip6tables -t nat -A OUTPUT -d "${AZ_SUBNET_V6:-fdcc:ad94:bacf:61a4::/64}" -j "$CHAIN" 2>/dev/null || true
+    
+    # Prepare ip6tables for fake IPv6 subnet (split-routing)
+    FAKE_IPV6_CHAIN="dnsmap6"
+    ip6tables -t nat -N "$FAKE_IPV6_CHAIN" 2>/dev/null || true
+    ip6tables -t nat -A PREROUTING -d "${AZ_FAKE_IPV6_SUBNET:-fdcc:ad94:bacf:61a5::/64}" -j "$FAKE_IPV6_CHAIN" 2>/dev/null || true
+    ip6tables -t nat -A OUTPUT -d "${AZ_FAKE_IPV6_SUBNET:-fdcc:ad94:bacf:61a5::/64}" -j "$FAKE_IPV6_CHAIN" 2>/dev/null || true
+    
+    for eth in $(ip link | grep -oE "eth[0-9]"); do
+        ip6tables -t nat -A POSTROUTING -o "$eth" -j MASQUERADE 2>/dev/null || true
+    done
+fi
+
 HOSTNAME=$(hostname -s)
 IPTABLES_SAVE="/root/antizapret/iptables/$HOSTNAME.rules"
 
@@ -114,12 +145,66 @@ if [ "$IPTABLES_SAVE_DISABLED" != "1" ] && [ -f "$IPTABLES_SAVE" ]; then
     rm -f "$IPTABLES_RESTORE_FILE"
   fi
 fi
+
+# Restore ip6tables rules if IPv6 is enabled
+if [ "$DISABLE_IPV6" != "true" ] && [ -f "${IPTABLES_SAVE}.v6" ]; then
+  LINES=$(wc -l < "${IPTABLES_SAVE}.v6")
+  echo "restoring ip6tables rules: $LINES"
+  if [ "$LINES" -gt 130000 ]; then
+    echo "ip6tables-save too big. removing old file."
+    rm -rf "${IPTABLES_SAVE}.v6"
+  else
+    IP6TABLES_RESTORE_FILE=$(mktemp)
+    {
+      printf '*nat\n'
+      grep -E "^-A $CHAIN " "${IPTABLES_SAVE}.v6" || true
+      printf 'COMMIT\n'
+    } > "$IP6TABLES_RESTORE_FILE"
+
+    if ip6tables-restore --noflush "$IP6TABLES_RESTORE_FILE"; then
+      echo "ip6tables rules restored"
+    else
+      echo "cant restore ip6tables rules"
+    fi
+    rm -f "$IP6TABLES_RESTORE_FILE"
+  fi
+fi
+
+# Restore ip6tables fake IPv6 chain rules if IPv6 is enabled
+if [ "$DISABLE_IPV6" != "true" ] && [ -f "${IPTABLES_SAVE}.v6.fake" ]; then
+  LINES=$(wc -l < "${IPTABLES_SAVE}.v6.fake")
+  echo "restoring ip6tables fake IPv6 chain rules: $LINES"
+  if [ "$LINES" -gt 130000 ]; then
+    echo "ip6tables fake IPv6 chain save too big. removing old file."
+    rm -rf "${IPTABLES_SAVE}.v6.fake"
+  else
+    IP6TABLES_FAKE_RESTORE_FILE=$(mktemp)
+    {
+      printf '*nat\n'
+      grep -E "^-A dnsmap6 " "${IPTABLES_SAVE}.v6.fake" || true
+      printf 'COMMIT\n'
+    } > "$IP6TABLES_FAKE_RESTORE_FILE"
+
+    if ip6tables-restore --noflush "$IP6TABLES_FAKE_RESTORE_FILE"; then
+      echo "ip6tables fake IPv6 chain rules restored"
+    else
+      echo "cant restore ip6tables fake IPv6 chain rules"
+    fi
+    rm -f "$IP6TABLES_FAKE_RESTORE_FILE"
+  fi
+fi
 set -x
 
 function save_iptables () {
     [ "$IPTABLES_SAVE_DISABLED" = "1" ] && return 0
     echo "saving iptables..."
     iptables-save -t "nat" | grep -E "^-A $CHAIN " > /tmp/iptables.rules && mv -f /tmp/iptables.rules "$IPTABLES_SAVE" && echo "iptables saved"
+    if [ "$DISABLE_IPV6" != "true" ]; then
+        echo "saving ip6tables..."
+        ip6tables-save -t "nat" | grep -E "^-A $CHAIN " > /tmp/ip6tables.rules && mv -f /tmp/ip6tables.rules "${IPTABLES_SAVE}.v6" && echo "ip6tables saved"
+        echo "saving ip6tables fake IPv6 chain..."
+        ip6tables-save -t "nat" | grep -E "^-A dnsmap6 " > /tmp/ip6tables_fake.rules && mv -f /tmp/ip6tables_fake.rules "${IPTABLES_SAVE}.v6.fake" && echo "ip6tables fake IPv6 chain saved"
+    fi
 }
 
 ZAPRET_STARTED=0

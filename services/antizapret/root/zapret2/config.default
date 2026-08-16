@@ -39,4 +39,9 @@ MODE_FILTER=none
 FLOWOFFLOAD=donttouch
 INIT_APPLY_FW=1
 DISABLE_IPV6=1
+# IPv6 is disabled in zapret2 because:
+# 1. The anti-DPI functionality (NFQWS2) is primarily designed for IPv4 traffic
+# 2. Enabling IPv6 in zapret2 may cause regressions in the existing anti-DPI setup
+# 3. VPN client IPv6 support works independently via WireGuard and routing rules
+# 4. If IPv6 anti-DPI is needed in the future, it can be enabled by setting DISABLE_IPV6=0
 FILTER_TTL_EXPIRED_ICMP=1

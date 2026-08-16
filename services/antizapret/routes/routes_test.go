@@ -207,9 +207,11 @@ func TestUpdateRoutesChecksNonDefaultMainRoutesBeforeVPNPolicyTable(t *testing.T
 	if len(routes) != 0 {
 		t.Fatalf("routes = %#v, want none", routes)
 	}
-	if len(rules) != 2 {
-		t.Fatalf("rules = %#v, want 2 rules", rules)
+	// Now expects 4 rules: 2 IPv4 (main + VPN table) + 2 IPv6 (main + VPN table)
+	if len(rules) != 4 {
+		t.Fatalf("rules = %#v, want 4 rules (2 IPv4 + 2 IPv6)", rules)
 	}
+	// First two rules should be IPv4
 	if rules[0].Src == nil || rules[0].Src.String() != "10.1.166.0/24" {
 		t.Fatalf("rules[0].Src = %v, want 10.1.166.0/24", rules[0].Src)
 	}
@@ -230,6 +232,34 @@ func TestUpdateRoutesChecksNonDefaultMainRoutesBeforeVPNPolicyTable(t *testing.T
 	}
 	if rules[1].Table != vpnRouteTable || rules[1].Priority != vpnRulePriority {
 		t.Fatalf("rules[1] table/priority = %v/%v, want %v/%v", rules[1].Table, rules[1].Priority, vpnRouteTable, vpnRulePriority)
+	}
+	// Next two rules should be IPv6
+	if rules[2].Src == nil || rules[2].Src.String() != "10.1.166.0/24" {
+		t.Fatalf("rules[2].Src = %v, want 10.1.166.0/24", rules[2].Src)
+	}
+	if rules[2].Dst != nil {
+		t.Fatalf("rules[2].Dst = %v, want any destination", rules[2].Dst)
+	}
+	if rules[2].Table != mainRouteTable || rules[2].Priority != vpnLocalPriority {
+		t.Fatalf("rules[2] table/priority = %v/%v, want %v/%v", rules[2].Table, rules[2].Priority, mainRouteTable, vpnLocalPriority)
+	}
+	if rules[2].SuppressPrefixlen != 0 {
+		t.Fatalf("rules[2].SuppressPrefixlen = %v, want 0", rules[2].SuppressPrefixlen)
+	}
+	if rules[2].Family != netlink.FAMILY_V6 {
+		t.Fatalf("rules[2].Family = %v, want FAMILY_V6", rules[2].Family)
+	}
+	if rules[3].Src == nil || rules[3].Src.String() != "10.1.166.0/24" {
+		t.Fatalf("rules[3].Src = %v, want 10.1.166.0/24", rules[3].Src)
+	}
+	if rules[3].Dst != nil {
+		t.Fatalf("rules[3].Dst = %v, want any destination", rules[3].Dst)
+	}
+	if rules[3].Table != vpnRouteTableV6 || rules[3].Priority != vpnRulePriority {
+		t.Fatalf("rules[3] table/priority = %v/%v, want %v/%v", rules[3].Table, rules[3].Priority, vpnRouteTableV6, vpnRulePriority)
+	}
+	if rules[3].Family != netlink.FAMILY_V6 {
+		t.Fatalf("rules[3].Family = %v, want FAMILY_V6", rules[3].Family)
 	}
 }
 

@@ -1,6 +1,6 @@
 services:
   antizapret:
-    image: xtrime/antizapret-vpn:6.8.0
+    image: xtrime/antizapret-vpn:6.9.0
     restart: unless-stopped
     init: true
     cap_add:
@@ -8,6 +8,8 @@ services:
     sysctls:
       - net.ipv4.ip_forward=1
       - net.ipv4.conf.all.src_valid_mark=1
+      - net.ipv6.conf.all.forwarding=1
+      - net.ipv6.conf.all.disable_ipv6=0
     extra_hosts:
       - "raw.githubusercontent.com=185.199.108.133"
     build: 
@@ -36,6 +38,9 @@ services:
       - $PWD/config/adguard/work:/opt/adguardhome/work
     environment:
       - TINI_KILL_PROCESS_GROUP=1
+      - DISABLE_IPV6=false
+      - AZ_SUBNET_V6=fdcc:ad94:bacf:61a4::/64
+      - AZ_FAKE_IPV6_SUBNET=fdcc:ad94:bacf:61a5::/64
       - |
         ROUTES=
         ocserv:10.1.164.0/24;
@@ -45,6 +50,9 @@ services:
         adguard:14.16.0.1;
         az-local:14.16.0.0/15;
         az-world:14.18.0.0/15;
+        az-local-v6:fdcc:ad94:bacf:61a4::/64;
+        az-world-v6:fdcc:ad94:bacf:61a5::/64;
+        az-fake-v6:fdcc:ad94:bacf:61a5::/64;
       - DNS=adguard
       - CLIENT
       - DOALL_DISABLED

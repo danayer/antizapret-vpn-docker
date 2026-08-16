@@ -86,6 +86,141 @@ https://t.me/antizapret_support
 5) Фейковый IP отправляется в DNS-ответе клиенту.
 6) VPN-туннели настроены с раздельным туннелированием. Только трафик в подсеть 14.16.0.0/14 маршрутизируется через VPN.
 
+# Поддержка IPv6
+
+## Обзор
+
+Система теперь поддерживает полную IPv6-коннективность для VPN-клиентов со следующими возможностями:
+
+1. **VPN-клиенты получают IPv6-адреса** - WireGuard-клиенты получают IPv6-адреса из префикса `fdcc:ad94:bacf:61a4::cafe:0/112`
+2. **Полнотуннельная IPv6-коннективность** - Клиенты могут маршрутизировать весь IPv6-трафик через VPN-туннель
+3. **Постдоменное управление IPv6-маршрутизацией** - Правила на уровне доменов могут явно выбирать поведение IPv6 vs IPv4
+4. **ASN-базированные правила разрешения/блокировки IPv6** - ASN-маршрутизация поддерживает IPv6 отдельно для узлов выхода `local` и `world`
+5. **Выбор источника IPv6** - Выбор того, откуда приходит IPv6: от узла `local` или `world` на уровне правил маршрутизации
+
+## Включение IPv6
+
+IPv6 включен по умолчанию в контейнерах WireGuard и antizapret. Следующие переменные окружения управляют поведением IPv6:
+
+### WireGuard (services/wireguard/docker-compose.base.yml)
+- `DISABLE_IPV6=false` - Включить IPv6 (по умолчанию: false)
+- `WG_IPV6_CIDR=fdcc:ad94:bacf:61a4::cafe:0/112` - IPv6-префикс для адресов клиентов
+- `WG_IPV6_DNS=fdcc:ad94:bacf:61a4::cafe:1` - IPv6 DNS-сервер для клиентов
+
+### Antizapret (services/antizapret/docker-compose.yml)
+- `DISABLE_IPV6=false` - Включить IPv6-форвардинг и правила файрвола
+- `AZ_SUBNET_V6=fdcc:ad94:bacf:61a4::/64` - IPv6-подсеть для фейковых IP-маппингов
+
+## Проверка IPv6 на подключенном клиенте
+
+После подключения WireGuard-клиента проверьте IPv6-коннективность:
+
+```bash
+# Проверка IPv6-адреса, назначенного интерфейсу WireGuard
+ip -6 addr show wg0
+
+# Проверка IPv6-маршрутов
+ip -6 route show
+
+# Тест IPv6-коннективности через туннель
+curl -6 https://ifconfig.co
+
+# Тест IPv6 DNS-разрешения
+dig AAAA google.com @fdcc:ad94:bacf:61a4::cafe:1
+```
+
+## Постдоменное управление IPv6-маршрутизацией
+
+Вы можете управлять IPv6-маршрутизацией для конкретных доменов, добавляя записи в файлы пользовательских правил:
+
+### Списки хостов IPv6 (управление на уровне доменов)
+
+Отредактируйте эти файлы в `config/antizapret/custom/`:
+
+- `include-hosts-v6-custom.txt` - Домены для маршрутизации через IPv6 через узел выхода `local`
+- `include-hosts-v6-world-custom.txt` - Домены для маршрутизации через IPv6 через узел выхода `world`
+- `exclude-hosts-v6-custom.txt` - Домены для исключения из IPv6-маршрутизации `local`
+- `exclude-hosts-v6-world-custom.txt` - Домены для исключения из IPv6-маршрутизации `world`
+
+**Пример:**
+```
+# config/antizapret/custom/include-hosts-v6-custom.txt
+example.com
+ipv6.example.org
+
+# config/antizapret/custom/include-hosts-v6-world-custom.txt
+geo-blocked-site.com
+```
+
+Эти правила генерируют AdGuard-правила с суффиксами `client=az-local-v6` или `client=az-world-v6`.
+
+### ASN-базированные правила разрешения/блокировки IPv6
+
+Отредактируйте эти файлы в `config/antizapret/custom/`:
+
+- `include-asn-v6-custom.txt` - ASN для разрешения IPv6 через узел выхода `local`
+- `include-asn-v6-world-custom.txt` - ASN для разрешения IPv6 через узел выхода `world`
+- `exclude-asn-v6-custom.txt` - ASN для блокировки IPv6 через узел выхода `local`
+- `exclude-asn-v6-world-custom.txt` - ASN для блокировки IPv6 через узел выхода `world`
+
+**Пример:**
+```
+# config/antizapret/custom/include-asn-v6-custom.txt
+AS15169  # Google
+AS13335  # Cloudflare
+
+# config/antizapret/custom/exclude-asn-v6-world-custom.txt
+AS12345  # Заблокировать этот ASN от world IPv6
+```
+
+## Выбор источника IPv6 (local vs world)
+
+Система поддерживает выбор узла выхода IPv6 на уровне правила маршрутизации:
+
+- **az-local-v6** - IPv6-трафик маршрутизируется через локальный узел выхода
+- **az-world-v6** - IPv6-трафик маршрутизируется через мировой узел выхода
+
+Это контролируется тем, в какой файл пользовательских правил вы добавляете домен/ASN:
+- `include-hosts-v6-custom.txt` → `az-local-v6`
+- `include-hosts-v6-world-custom.txt` → `az-world-v6`
+- `include-asn-v6-custom.txt` → `az-local-v6`
+- `include-asn-v6-world-custom.txt` → `az-world-v6`
+
+## Совместимость zapret2 с IPv6
+
+Компонент anti-DPI zapret2 имеет поддержку IPv6, отключенную по умолчанию (`DISABLE_IPV6=1` в `config/zapret2/config.default`). Это связано с тем, что:
+
+1. Функциональность anti-DPI (NFQWS2) в основном предназначена для IPv4-трафика
+2. Включение IPv6 в zapret2 может вызвать регрессии в существующей настройке anti-DPI
+3. Поддержка IPv6 для VPN-клиентов работает независимо через WireGuard и правила маршрутизации
+
+Если в будущем понадобится anti-DPI для IPv6, его можно включить, установив `DISABLE_IPV6=0` в конфиге zapret2.
+
+## Раздельная маршрутизация IPv6 (Fake IP маппинг для AAAA запросов)
+
+Система теперь поддерживает раздельную маршрутизацию для IPv6 с использованием фейкового IP маппинга, аналогично механизму IPv4:
+
+- **Фейковая IPv6 подсеть**: `fdcc:ad94:bacf:61a5::/64` (настраивается через `AZ_FAKE_IPV6_SUBNET`)
+- **dnsmap.py** обрабатывает AAAA запросы и создает фейковые IPv6 маппинги из этой подсети
+- **ip6tables** DNAT правила маппят фейковые IPv6 адреса обратно на реальные IPv6 адреса
+- **Постдоменное/ASN управление**: Используются те же файлы пользовательских правил (`include-hosts-v6-custom.txt`, `include-asn-v6-custom.txt` и т.д.) для управления тем, какие домены/ASN получают IPv6 раздельную маршрутизацию
+
+Это позволяет маршрутизировать домены через VPN-туннель используя IPv6, с теми же преимуществами раздельного туннелирования, что и для IPv4.
+
+## Ограничения
+
+- zapret2 anti-DPI не обрабатывает IPv6-трафик (DISABLE_IPV6=1 в конфиге zapret2)
+
+## Сводка переменных окружения
+
+| Переменная | По умолчанию | Описание |
+|------------|-------------|-------------|
+| `DISABLE_IPV6` | `false` | Включить/отключить поддержку IPv6 |
+| `WG_IPV6_CIDR` | `fdcc:ad94:bacf:61a4::cafe:0/112` | IPv6-префикс для клиентов WireGuard |
+| `WG_IPV6_DNS` | `fdcc:ad94:bacf:61a4::cafe:1` | IPv6 DNS для клиентов WireGuard |
+| `AZ_SUBNET_V6` | `fdcc:ad94:bacf:61a4::/64` | IPv6-подсеть для маршрутизации antizapret |
+| `AZ_FAKE_IPV6_SUBNET` | `fdcc:ad94:bacf:61a5::/64` | Фейковая IPv6 подсеть для раздельной маршрутизации antizapret |
+
 # Установка
 
 > [!IMPORTANT]

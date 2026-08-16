@@ -73,6 +73,10 @@ https://t.me/antizapret_support
 - Support for kernel modules for OpenVPN and Amnezia Wireguard to decrease CPU usage.
 - SOCKS5 and HTTP(S) proxies for per-application routing through local or world exit nodes
 - Built-in anti-DPI support with [bol-van/zapret2](https://github.com/bol-van/zapret2) for HTTP, TLS, and QUIC traffic. Config bundled from [vernette/ss-zapret2](https://github.com/vernette/ss-zapret2)
+- **Full IPv6 support for VPN clients** - WireGuard clients receive IPv6 addresses and can use full-tunnel IPv6 connectivity
+- **Per-domain IPv6 routing controls** - Domain-level rules can explicitly choose IPv6 vs IPv4 behavior for `local` and `world` exit nodes
+- **ASN-based IPv6 allow/deny rules** - ASN routing supports IPv6 separately for `local` and `world` exit nodes
+- **IPv6 source selection** - Choose whether IPv6 comes from `local` or `world` exit node at the routing-rule level
 
 # How it works?
 
@@ -86,6 +90,140 @@ https://t.me/antizapret_support
 5) Fake IP is sent in DNS response to client
 6) VPN tunnels configured with split tunneling. Only traffic to 14.16.0.0/14 subnet is routed through VPN.
 
+# IPv6 Support
+
+## Overview
+
+The system now supports full IPv6 connectivity for VPN clients with the following capabilities:
+
+1. **VPN clients receive IPv6 addresses** - WireGuard clients get IPv6 addresses from the `fdcc:ad94:bacf:61a4::cafe:0/112` prefix
+2. **Full-tunnel IPv6 connectivity** - Clients can route all IPv6 traffic through the VPN tunnel
+3. **Per-domain IPv6 routing controls** - Domain-level rules can explicitly choose IPv6 vs IPv4 behavior
+4. **ASN-based IPv6 allow/deny rules** - ASN routing supports IPv6 separately for `local` and `world` exit nodes
+5. **IPv6 source selection** - Choose whether IPv6 comes from `local` or `world` exit node
+
+## Enabling IPv6
+
+IPv6 is enabled by default in the WireGuard and antizapret containers. The following environment variables control IPv6 behavior:
+
+### WireGuard (services/wireguard/docker-compose.base.yml)
+- `DISABLE_IPV6=false` - Enable IPv6 (default: false)
+- `WG_IPV6_CIDR=fdcc:ad94:bacf:61a4::cafe:0/112` - IPv6 prefix for client addresses
+- `WG_IPV6_DNS=fdcc:ad94:bacf:61a4::cafe:1` - IPv6 DNS server for clients
+
+### Antizapret (services/antizapret/docker-compose.yml)
+- `DISABLE_IPV6=false` - Enable IPv6 forwarding and firewall rules
+- `AZ_SUBNET_V6=fdcc:ad94:bacf:61a4::/64` - IPv6 subnet for fake IP mappings
+
+## Verifying IPv6 on a Connected Client
+
+After connecting a WireGuard client, verify IPv6 connectivity:
+
+```bash
+# Check IPv6 address assigned to WireGuard interface
+ip -6 addr show wg0
+
+# Check IPv6 routes
+ip -6 route show
+
+# Test IPv6 connectivity through the tunnel
+curl -6 https://ifconfig.co
+
+# Test IPv6 DNS resolution
+dig AAAA google.com @fdcc:ad94:bacf:61a4::cafe:1
+```
+
+## Per-Domain IPv6 Routing Controls
+
+You can control IPv6 routing for specific domains by adding entries to the custom rule files:
+
+### IPv6 Host Lists (Domain-level control)
+
+Edit these files in `config/antizapret/custom/`:
+
+- `include-hosts-v6-custom.txt` - Domains to route via IPv6 through `local` exit node
+- `include-hosts-v6-world-custom.txt` - Domains to route via IPv6 through `world` exit node
+- `exclude-hosts-v6-custom.txt` - Domains to exclude from IPv6 `local` routing
+- `exclude-hosts-v6-world-custom.txt` - Domains to exclude from IPv6 `world` routing
+
+**Example:**
+```
+# config/antizapret/custom/include-hosts-v6-custom.txt
+example.com
+ipv6.example.org
+
+# config/antizapret/custom/include-hosts-v6-world-custom.txt
+geo-blocked-site.com
+```
+
+These generate AdGuard rules with `client=az-local-v6` or `client=az-world-v6` suffixes.
+
+### ASN-Based IPv6 Allow/Deny Rules
+
+Edit these files in `config/antizapret/custom/`:
+
+- `include-asn-v6-custom.txt` - ASNs to allow IPv6 through `local` exit node
+- `include-asn-v6-world-custom.txt` - ASNs to allow IPv6 through `world` exit node
+- `exclude-asn-v6-custom.txt` - ASNs to deny IPv6 through `local` exit node
+- `exclude-asn-v6-world-custom.txt` - ASNs to deny IPv6 through `world` exit node
+
+**Example:**
+```
+# config/antizapret/custom/include-asn-v6-custom.txt
+AS15169  # Google
+AS13335  # Cloudflare
+
+# config/antizapret/custom/exclude-asn-v6-world-custom.txt
+AS12345  # Block this ASN from world IPv6
+```
+
+## IPv6 Source Selection (local vs world)
+
+The system supports selecting the IPv6 exit node at the routing-rule level:
+
+- **az-local-v6** - IPv6 traffic routes through the local exit node
+- **az-world-v6** - IPv6 traffic routes through the world exit node
+
+This is controlled by which custom rule file you add the domain/ASN to:
+- `include-hosts-v6-custom.txt` → `az-local-v6`
+- `include-hosts-v6-world-custom.txt` → `az-world-v6`
+- `include-asn-v6-custom.txt` → `az-local-v6`
+- `include-asn-v6-world-custom.txt` → `az-world-v6`
+
+## zapret2 IPv6 Compatibility
+
+The zapret2 anti-DPI component has IPv6 support disabled by default (`DISABLE_IPV6=1` in `config/zapret2/config.default`). This is because:
+
+1. The anti-DPI functionality (NFQWS2) is primarily designed for IPv4 traffic
+2. Enabling IPv6 in zapret2 may cause regressions in the existing anti-DPI setup
+3. VPN client IPv6 support works independently via WireGuard and routing rules
+
+If IPv6 anti-DPI is needed in the future, it can be enabled by setting `DISABLE_IPV6=0` in the zapret2 config.
+
+## IPv6 Split-Routing (Fake IP Mapping for AAAA Queries)
+
+The system now supports split-routing for IPv6 using fake IP mapping, similar to the IPv4 mechanism:
+
+- **Fake IPv6 subnet**: `fdcc:ad94:bacf:61a5::/64` (configured via `AZ_FAKE_IPV6_SUBNET`)
+- **dnsmap.py** handles AAAA queries and creates fake IPv6 mappings from this subnet
+- **ip6tables** DNAT rules map fake IPv6 addresses back to real IPv6 addresses
+- **Per-domain/ASN control**: Use the same custom rule files (`include-hosts-v6-custom.txt`, `include-asn-v6-custom.txt`, etc.) to control which domains/ASNs get IPv6 split-routing
+
+This allows domains to be routed through the VPN tunnel using IPv6, with the same split-tunneling benefits as IPv4.
+
+## Limitations
+
+- zapret2 anti-DPI does not process IPv6 traffic (`DISABLE_IPV6=1` in zapret2 config)
+
+## Environment Variables Summary
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `DISABLE_IPV6` | `false` | Enable/disable IPv6 support |
+| `WG_IPV6_CIDR` | `fdcc:ad94:bacf:61a4::cafe:0/112` | WireGuard client IPv6 prefix |
+| `WG_IPV6_DNS` | `fdcc:ad94:bacf:61a4::cafe:1` | WireGuard client IPv6 DNS |
+| `AZ_SUBNET_V6` | `fdcc:ad94:bacf:61a4::/64` | Antizapret IPv6 subnet for routing |
+| `AZ_FAKE_IPV6_SUBNET` | `fdcc:ad94:bacf:61a5::/64` | Antizapret fake IPv6 subnet for split-routing |
 
 # Installation
 

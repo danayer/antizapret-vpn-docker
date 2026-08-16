@@ -10,7 +10,7 @@ services:
       - net.ipv4.conf.all.src_valid_mark=1
     devices:
       - /dev/net/tun:/dev/net/tun
-    image: xtrime/antizapret-vpn-openvpn:6.7.5
+    image: xtrime/antizapret-vpn-openvpn:6.8.0
     build:
       context: .
       x-bake:
@@ -51,6 +51,9 @@ services:
         adguard:14.16.0.1;
         az-local:14.16.0.0/15;
         az-world:14.18.0.0/15;
+        az-local-v6:fdcc:ad94:bacf:61a4::/64;
+        az-world-v6:fdcc:ad94:bacf:61a5::/64;
+        az-fake-v6:fdcc:ad94:bacf:61a5::/64;
 
   openvpn-ui:
     hostname: openvpn-ui.antizapret
@@ -58,7 +61,7 @@ services:
     cap_add:
       - NET_ADMIN
       - SYS_MODULE
-    image: xtrime/antizapret-vpn-openvpn-ui:6.5.2
+    image: xtrime/antizapret-vpn-openvpn-ui:6.6.0
     build:
       context: .
       dockerfile: Dockerfile-ui

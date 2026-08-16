@@ -2,7 +2,7 @@ services:
   dashboard:
     hostname: dashboard.antizapret
     restart: unless-stopped
-    image: xtrime/antizapret-vpn-dashboard:5.0.0
+    image: xtrime/antizapret-vpn-dashboard:5.1.0
     build: 
       context: .
       x-bake:

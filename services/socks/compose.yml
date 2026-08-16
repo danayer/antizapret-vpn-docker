@@ -16,3 +16,6 @@ services:
         adguard:14.16.0.1;
         az-local:14.16.0.0/15;
         az-world:14.18.0.0/15;
+        az-local-v6:fdcc:ad94:bacf:61a4::/64;
+        az-world-v6:fdcc:ad94:bacf:61a5::/64;
+        az-fake-v6:fdcc:ad94:bacf:61a5::/64;

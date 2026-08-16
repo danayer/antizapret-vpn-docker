@@ -21,15 +21,20 @@ import (
 )
 
 const (
-	azLocalListPath   = "http://az-local.antizapret/list/?raw=1&file=/root/antizapret/result/ips.txt"
-	azWorldListPath   = "http://az-local.antizapret/list/?raw=1&file=/root/antizapret/result/ips-world.txt"
-	vpnDefaultRoute   = "default"
-	mainRouteTable    = 254
-	vpnRouteTable     = 100
-	vpnRulePriority   = 10000
-	vpnLocalPriority  = vpnRulePriority - 1
-	dnsTimeout        = 1 * time.Second
-	httpClientTimeout = 3 * time.Second
+	azLocalListPath     = "http://az-local.antizapret/list/?raw=1&file=/root/antizapret/result/ips.txt"
+	azWorldListPath     = "http://az-local.antizapret/list/?raw=1&file=/root/antizapret/result/ips-world.txt"
+	azLocalV6ListPath   = "http://az-local.antizapret/list/?raw=1&file=/root/antizapret/result/ips-v6.txt"
+	azWorldV6ListPath   = "http://az-local.antizapret/list/?raw=1&file=/root/antizapret/result/ips-v6-world.txt"
+	azFakeIPv6ListPath  = "http://az-local.antizapret/list/?raw=1&file=/root/antizapret/result/ips-fake-v6.txt"
+	vpnDefaultRoute     = "default"
+	vpnDefaultRouteV6   = "::/0"
+	mainRouteTable      = 254
+	vpnRouteTable       = 100
+	vpnRouteTableV6     = 101
+	vpnRulePriority     = 10000
+	vpnLocalPriority    = vpnRulePriority - 1
+	dnsTimeout          = 1 * time.Second
+	httpClientTimeout   = 3 * time.Second
 )
 
 var routeListClient = &http.Client{Timeout: httpClientTimeout}
@@ -52,20 +57,35 @@ var udpResolver = &net.Resolver{
 	},
 }
 
+var udpResolverV6 = &net.Resolver{
+	PreferGo: true,
+	Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
+		var d net.Dialer
+		d.Timeout = dnsTimeout
+		return d.DialContext(ctx, "udp", address)
+	},
+}
+
+var lookupIPV6 = func(ctx context.Context, host string) ([]net.IP, error) {
+	return udpResolverV6.LookupIP(ctx, "ip6", host)
+}
+
 type routeSpec struct {
 	host   string
 	subnet string
 }
 
 type app struct {
-	self          string
-	vpn           bool
-	verbose       bool
-	defaultRoute  string
-	routes        []routeSpec
-	routeGateways map[string]string
-	vpnGateways   map[string]string
-	gatewayLinks  map[string]int
+	self           string
+	vpn            bool
+	verbose        bool
+	defaultRoute   string
+	routes         []routeSpec
+	routeGateways  map[string]string
+	routeGatewaysV6 map[string]string
+	vpnGateways    map[string]string
+	vpnGatewaysV6  map[string]string
+	gatewayLinks   map[string]int
 }
 
 func main() {
@@ -215,8 +235,14 @@ func (a *app) updateRoutes() {
 	if a.routeGateways == nil {
 		a.routeGateways = make(map[string]string, len(a.routes))
 	}
+	if a.routeGatewaysV6 == nil {
+		a.routeGatewaysV6 = make(map[string]string, len(a.routes))
+	}
 	if a.vpnGateways == nil {
 		a.vpnGateways = make(map[string]string, len(a.routes))
+	}
+	if a.vpnGatewaysV6 == nil {
+		a.vpnGatewaysV6 = make(map[string]string, len(a.routes))
 	}
 	if a.gatewayLinks == nil {
 		a.gatewayLinks = make(map[string]int)
@@ -228,47 +254,87 @@ func (a *app) updateRoutes() {
 			if err := a.addVPNClientRules(route); err != nil {
 				fmt.Fprintf(os.Stderr, "failed to add VPN client rules: host=%s subnet=%s error=%v\n", route.host, route.subnet, err)
 			}
+			if err := a.addVPNClientRulesV6(route); err != nil {
+				fmt.Fprintf(os.Stderr, "failed to add VPN client rules V6: host=%s subnet=%s error=%v\n", route.host, route.subnet, err)
+			}
 		}
 
 		gateway := a.resolve(route.host)
 		if gateway == "" {
 			a.logVerbose("route skipped: host=%s subnet=%s reason=unresolved", route.host, route.subnet)
-			continue
-		}
-
-		if route.host == a.self {
-			a.logVerbose("route skipped: host=%s subnet=%s reason=self", route.host, route.subnet)
-			continue
-		}
-
-		currentGateway := a.routeGateways[route.host]
-		a.logVerbose("route state: host=%s subnet=%s current_gateway=%q resolved_gateway=%s", route.host, route.subnet, currentGateway, gateway)
-		if currentGateway != gateway {
-			if err := a.replaceRoute(route, gateway, false); err == nil {
-				a.routeGateways[route.host] = gateway
-				if currentGateway == "" {
-					fmt.Printf("Route added: %s via %s\n", route.subnet, gateway)
-				} else {
-					fmt.Printf("Route changed: %s via %s\n", route.subnet, gateway)
-				}
-			} else {
-				delete(a.routeGateways, route.host)
-				fmt.Fprintf(os.Stderr, "failed to replace route: host=%s subnet=%s gateway=%s error=%v\n", route.host, route.subnet, gateway, err)
-			}
 		} else {
-			a.logVerbose("route unchanged: %s via %s", route.subnet, gateway)
+			if route.host == a.self {
+				a.logVerbose("route skipped: host=%s subnet=%s reason=self", route.host, route.subnet)
+			} else {
+				currentGateway := a.routeGateways[route.host]
+				a.logVerbose("route state: host=%s subnet=%s current_gateway=%q resolved_gateway=%s", route.host, route.subnet, currentGateway, gateway)
+				if currentGateway != gateway {
+					if err := a.replaceRoute(route, gateway, false); err == nil {
+						a.routeGateways[route.host] = gateway
+						if currentGateway == "" {
+							fmt.Printf("Route added: %s via %s\n", route.subnet, gateway)
+						} else {
+							fmt.Printf("Route changed: %s via %s\n", route.subnet, gateway)
+						}
+					} else {
+						delete(a.routeGateways, route.host)
+						fmt.Fprintf(os.Stderr, "failed to replace route: host=%s subnet=%s gateway=%s error=%v\n", route.host, route.subnet, gateway, err)
+					}
+				} else {
+					a.logVerbose("route unchanged: %s via %s", route.subnet, gateway)
+				}
+			}
+		}
+
+		// IPv6 route resolution
+		gatewayV6 := a.resolveV6(route.host)
+		if gatewayV6 == "" {
+			a.logVerbose("route V6 skipped: host=%s subnet=%s reason=unresolved", route.host, route.subnet)
+		} else {
+			if route.host == a.self {
+				a.logVerbose("route V6 skipped: host=%s subnet=%s reason=self", route.host, route.subnet)
+			} else {
+				currentGatewayV6 := a.routeGatewaysV6[route.host]
+				a.logVerbose("route V6 state: host=%s subnet=%s current_gateway=%q resolved_gateway=%s", route.host, route.subnet, currentGatewayV6, gatewayV6)
+				if currentGatewayV6 != gatewayV6 {
+					if err := a.replaceRouteV6(route, gatewayV6, false); err == nil {
+						a.routeGatewaysV6[route.host] = gatewayV6
+						if currentGatewayV6 == "" {
+							fmt.Printf("Route V6 added: %s via %s\n", route.subnet, gatewayV6)
+						} else {
+							fmt.Printf("Route V6 changed: %s via %s\n", route.subnet, gatewayV6)
+						}
+					} else {
+						delete(a.routeGatewaysV6, route.host)
+						fmt.Fprintf(os.Stderr, "failed to replace route V6: host=%s subnet=%s gateway=%s error=%v\n", route.host, route.subnet, gatewayV6, err)
+					}
+				} else {
+					a.logVerbose("route V6 unchanged: %s via %s", route.subnet, gatewayV6)
+				}
+			}
 		}
 
 		if a.vpn {
 			if a.vpnGateways[route.host] == gateway {
 				a.logVerbose("VPN route unchanged: host=%s gateway=%s", route.host, gateway)
-				continue
+			} else if gateway != "" {
+				if err := a.applyVPNRoutes(route.host, gateway); err != nil {
+					delete(a.vpnGateways, route.host)
+					fmt.Fprintf(os.Stderr, "failed to apply VPN routes: host=%s gateway=%s error=%v\n", route.host, gateway, err)
+				} else {
+					a.vpnGateways[route.host] = gateway
+				}
 			}
-			if err := a.applyVPNRoutes(route.host, gateway); err != nil {
-				delete(a.vpnGateways, route.host)
-				fmt.Fprintf(os.Stderr, "failed to apply VPN routes: host=%s gateway=%s error=%v\n", route.host, gateway, err)
-			} else {
-				a.vpnGateways[route.host] = gateway
+
+			if a.vpnGatewaysV6[route.host] == gatewayV6 {
+				a.logVerbose("VPN route V6 unchanged: host=%s gateway=%s", route.host, gatewayV6)
+			} else if gatewayV6 != "" {
+				if err := a.applyVPNRoutes(route.host, gatewayV6); err != nil {
+					delete(a.vpnGatewaysV6, route.host)
+					fmt.Fprintf(os.Stderr, "failed to apply VPN routes V6: host=%s gateway=%s error=%v\n", route.host, gatewayV6, err)
+				} else {
+					a.vpnGatewaysV6[route.host] = gatewayV6
+				}
 			}
 		}
 	}
@@ -302,10 +368,43 @@ func (a *app) resolve(host string) string {
 	return ""
 }
 
+func (a *app) resolveV6(host string) string {
+	if isIPv6(host) {
+		a.logVerbose("LookupIPV6 skipped for literal IPv6 host=%s", host)
+		return host
+	}
+	start := time.Now()
+	ctx, cancel := context.WithTimeout(context.Background(), dnsTimeout)
+	defer cancel()
+
+	ips, err := lookupIPV6(ctx, host)
+	elapsed := time.Since(start)
+	if err == nil {
+		for _, ip := range ips {
+			if v6 := ip.To16(); v6 != nil && v6.To4() == nil {
+				a.logVerbose("LookupIPV6 host=%s ip=%s duration=%s", host, v6.String(), elapsed)
+				return v6.String()
+			}
+		}
+	}
+	if err != nil {
+		a.logVerbose("LookupIPV6 host=%s failed duration=%s error=%v", host, elapsed, err)
+	} else {
+		a.logVerbose("LookupIPV6 host=%s returned no IPv6 duration=%s", host, elapsed)
+	}
+	return ""
+}
+
 // isIPv4 reports whether value is a literal IPv4 address.
 func isIPv4(value string) bool {
 	ip := net.ParseIP(strings.TrimSpace(value))
 	return ip != nil && ip.To4() != nil
+}
+
+// isIPv6 reports whether value is a literal IPv6 address.
+func isIPv6(value string) bool {
+	ip := net.ParseIP(strings.TrimSpace(value))
+	return ip != nil && ip.To4() == nil && ip.To16() != nil
 }
 
 // parseRouteDst converts a route destination into netlink form; nil means default route.
@@ -314,7 +413,7 @@ func parseRouteDst(subnet string) (*net.IPNet, error) {
 	if subnet == "" {
 		return nil, errors.New("empty route destination")
 	}
-	if subnet == "default" || subnet == "0.0.0.0/0" {
+	if subnet == "default" || subnet == "0.0.0.0/0" || subnet == "::/0" {
 		return nil, nil
 	}
 	if strings.Contains(subnet, "/") {
@@ -325,13 +424,19 @@ func parseRouteDst(subnet string) (*net.IPNet, error) {
 		return dst, nil
 	}
 	ip := net.ParseIP(subnet)
-	if ip == nil || ip.To4() == nil {
-		return nil, fmt.Errorf("invalid IPv4 route destination: %s", subnet)
+	if ip == nil {
+		return nil, fmt.Errorf("invalid route destination: %s", subnet)
 	}
-	return &net.IPNet{IP: ip.To4(), Mask: net.CIDRMask(32, 32)}, nil
+	if ip.To4() != nil {
+		return &net.IPNet{IP: ip.To4(), Mask: net.CIDRMask(32, 32)}, nil
+	}
+	if ip.To16() != nil {
+		return &net.IPNet{IP: ip.To16(), Mask: net.CIDRMask(128, 128)}, nil
+	}
+	return nil, fmt.Errorf("invalid route destination: %s", subnet)
 }
 
-// routeSpecFor builds a netlink route for the requested routing table.
+// routeSpecFor builds a netlink route for the requested routing table (IPv4).
 func routeSpecFor(subnet, gateway string, table int) (netlink.Route, error) {
 	dst, err := parseRouteDst(subnet)
 	if err != nil {
@@ -342,6 +447,32 @@ func routeSpecFor(subnet, gateway string, table int) (netlink.Route, error) {
 		return netlink.Route{}, fmt.Errorf("invalid IPv4 gateway: %s", gateway)
 	}
 	return netlink.Route{Dst: dst, Gw: gw, Table: table}, nil
+}
+
+// routeSpecForV6 builds a netlink route for the requested routing table (IPv6).
+func routeSpecForV6(subnet, gateway string, table int) (netlink.Route, error) {
+	dst, err := parseRouteDst(subnet)
+	if err != nil {
+		return netlink.Route{}, err
+	}
+	gw, err := parseIPv6(gateway)
+	if err != nil {
+		return netlink.Route{}, fmt.Errorf("invalid IPv6 gateway: %s", gateway)
+	}
+	return netlink.Route{Dst: dst, Gw: gw, Table: table}, nil
+}
+
+// parseIPv6 parses and copies a literal IPv6 address.
+func parseIPv6(value string) (net.IP, error) {
+	ip := net.ParseIP(strings.TrimSpace(value))
+	if ip == nil {
+		return nil, errors.New("invalid IPv6 address")
+	}
+	v6 := ip.To16()
+	if v6 == nil || v6.To4() != nil {
+		return nil, errors.New("invalid IPv6 address")
+	}
+	return append(net.IP(nil), v6...), nil
 }
 
 // replaceRoute performs ip route replace, optionally in the VPN policy table.
@@ -366,6 +497,28 @@ func (a *app) replaceRoute(route routeSpec, gateway string, useVPNTable bool) er
 	return err
 }
 
+// replaceRouteV6 performs ip route replace for IPv6, optionally in the VPN policy table.
+func (a *app) replaceRouteV6(route routeSpec, gateway string, useVPNTable bool) error {
+	start := time.Now()
+	table := 0
+	if useVPNTable {
+		table = vpnRouteTableV6
+	}
+	routeNetLink, err := routeSpecForV6(route.subnet, gateway, table)
+	if err != nil {
+		return err
+	}
+	linkIndex, err := a.linkIndexForGatewayV6(gateway)
+	if err != nil {
+		return err
+	}
+	routeNetLink.LinkIndex = linkIndex
+	routeNetLink.SetFlag(netlink.FLAG_ONLINK)
+	err = routeReplace(&routeNetLink)
+	a.logVerbose("netlink RouteReplaceV6 dst=%s gateway=%s duration=%s err=%v", route.subnet, gateway, time.Since(start), err)
+	return err
+}
+
 // linkIndexForGateway resolves the output interface explicitly. Older kernels
 // cannot always infer it when the first route is added to a policy table.
 func (a *app) linkIndexForGateway(gateway string) (int, error) {
@@ -374,6 +527,32 @@ func (a *app) linkIndexForGateway(gateway string) (int, error) {
 	}
 
 	gatewayIP, err := parseIPv4(gateway)
+	if err != nil {
+		return 0, err
+	}
+	routes, err := routeGet(gatewayIP)
+	if err != nil {
+		return 0, fmt.Errorf("failed to resolve interface for gateway %s: %w", gateway, err)
+	}
+	for _, route := range routes {
+		if route.LinkIndex > 0 {
+			if a.gatewayLinks == nil {
+				a.gatewayLinks = make(map[string]int)
+			}
+			a.gatewayLinks[gateway] = route.LinkIndex
+			return route.LinkIndex, nil
+		}
+	}
+	return 0, fmt.Errorf("failed to resolve interface for gateway %s", gateway)
+}
+
+// linkIndexForGatewayV6 resolves the output interface explicitly for IPv6.
+func (a *app) linkIndexForGatewayV6(gateway string) (int, error) {
+	if linkIndex := a.gatewayLinks[gateway]; linkIndex > 0 {
+		return linkIndex, nil
+	}
+
+	gatewayIP, err := parseIPv6(gateway)
 	if err != nil {
 		return 0, err
 	}
@@ -423,6 +602,36 @@ func (a *app) addVPNClientRules(route routeSpec) error {
 	return addRule(rule)
 }
 
+// addVPNClientRulesV6 checks non-default routes in the main table first, so
+// connected networks stay local, and sends the remaining VPN client traffic
+// to the VPN policy table (IPv6).
+func (a *app) addVPNClientRulesV6(route routeSpec) error {
+	vpnSubnet, err := parseRouteDst(route.subnet)
+	if err != nil {
+		return err
+	}
+	if vpnSubnet == nil {
+		return errors.New("VPN client rule requires a source subnet")
+	}
+
+	localRule := netlink.NewRule()
+	localRule.Family = netlink.FAMILY_V6
+	localRule.Priority = vpnLocalPriority
+	localRule.Table = mainRouteTable
+	localRule.Src = vpnSubnet
+	localRule.SuppressPrefixlen = 0
+	if err := addRule(localRule); err != nil {
+		return err
+	}
+
+	rule := netlink.NewRule()
+	rule.Family = netlink.FAMILY_V6
+	rule.Priority = vpnRulePriority
+	rule.Table = vpnRouteTableV6
+	rule.Src = vpnSubnet
+	return addRule(rule)
+}
+
 func addRule(rule *netlink.Rule) error {
 	err := ruleAdd(rule)
 	if errors.Is(err, syscall.EEXIST) {
@@ -440,6 +649,12 @@ func (a *app) applyVPNRoutes(host, gateway string) error {
 		return a.applyAZRoutes(host, gateway, azLocalListPath)
 	case "az-world":
 		return a.applyAZRoutes(host, gateway, azWorldListPath)
+	case "az-local-v6":
+		return a.applyAZRoutesV6(host, gateway, azLocalV6ListPath)
+	case "az-world-v6":
+		return a.applyAZRoutesV6(host, gateway, azWorldV6ListPath)
+	case "az-fake-v6":
+		return a.applyAZRoutesV6(host, gateway, azFakeIPv6ListPath)
 	}
 	return nil
 }
@@ -453,6 +668,17 @@ func (a *app) applyAZRoutes(host, gateway, listPath string) error {
 		return err
 	}
 	return a.replaceRoutesFromFile(listPath, host, gateway)
+}
+
+// applyAZRoutesV6 adds the AZ subnet/default and optional route list to the VPN policy table (IPv6).
+func (a *app) applyAZRoutesV6(host, gateway, listPath string) error {
+	if host == a.defaultRoute {
+		return a.replaceRouteV6(routeSpec{host: host, subnet: vpnDefaultRouteV6}, gateway, true)
+	}
+	if err := a.replaceRouteV6(routeSpec{host: host, subnet: a.subnetForHost(host)}, gateway, true); err != nil {
+		return err
+	}
+	return a.replaceRoutesFromFileV6(listPath, host, gateway)
 }
 
 // subnetForHost returns the configured ROUTES subnet for host.
@@ -482,6 +708,13 @@ func parseIPv4(value string) (net.IP, error) {
 func (a *app) replaceRoutesFromFile(path, host, gateway string) error {
 	return forEachRouteLine(path, func(subnet string) error {
 		return a.replaceRoute(routeSpec{subnet: subnet, host: host}, gateway, true)
+	})
+}
+
+// replaceRoutesFromFileV6 replaces every route from a downloaded list into the VPN policy table (IPv6).
+func (a *app) replaceRoutesFromFileV6(path, host, gateway string) error {
+	return forEachRouteLine(path, func(subnet string) error {
+		return a.replaceRouteV6(routeSpec{subnet: subnet, host: host}, gateway, true)
 	})
 }
 

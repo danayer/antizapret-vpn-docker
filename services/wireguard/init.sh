@@ -15,6 +15,10 @@ export WG_PORT=${WG_PORT:-51820}
 export MTU=${MTU:-1280}
 export AZ_SUBNET=${AZ_SUBNET:-"14.16.0.0/14"}
 WG_DEFAULT_DNS_VALUE="${WG_DEFAULT_DNS:-14.16.0.1}"
+# Add IPv6 DNS if IPv6 is enabled
+if [ "$DISABLE_IPV6" != "true" ] && [ -n "$WG_IPV6_DNS" ]; then
+    WG_DEFAULT_DNS_VALUE="${WG_DEFAULT_DNS_VALUE},${WG_IPV6_DNS}"
+fi
 
 DOCKER_SUBNET="$(ipcalc "$(ip -4 addr show dev eth0 | awk '$1=="inet" {print $2; exit}')" | awk '/Network:/ {print $2}')"
 
@@ -44,6 +48,11 @@ if [ -z "$WG_ALLOWED_IPS" ]; then
     fi
 fi
 
+# Add IPv6 allowed IPs if IPv6 is enabled
+if [ "$DISABLE_IPV6" != "true" ] && [ -n "$WG_IPV6_CIDR" ]; then
+    WG_ALLOWED_IPS="${WG_ALLOWED_IPS},${WG_IPV6_CIDR},::/0"
+fi
+
 routes --vpn &
 
 # Escape single quotes in values for SQLite
@@ -59,7 +68,7 @@ sql_value_or_null() {
 # wg-easy v15 environment variables
 export PORT=${PORT:-51821}
 export INSECURE=${INSECURE:-true}
-export DISABLE_IPV6=${DISABLE_IPV6:-true}
+export DISABLE_IPV6=${DISABLE_IPV6:-false}
 
 # Unattended initial setup (only used on first run when DB does not exist)
 export INIT_ENABLED=true
@@ -109,6 +118,12 @@ iptables -D FORWARD -o wg0 -j ACCEPT;
 EOF
 )
 
+# IPv6 firewall rules
+if [ "$DISABLE_IPV6" != "true" ] && [ -n "$WG_IPV6_CIDR" ]; then
+    CUSTOM_POST_UP="${CUSTOM_POST_UP} ip6tables -A FORWARD -i wg0 -j ACCEPT; ip6tables -A FORWARD -o wg0 -j ACCEPT; ip6tables -t nat -A POSTROUTING -s ${WG_IPV6_CIDR} -j MASQUERADE;"
+    CUSTOM_POST_DOWN="${CUSTOM_POST_DOWN} ip6tables -D FORWARD -i wg0 -j ACCEPT; ip6tables -D FORWARD -o wg0 -j ACCEPT; ip6tables -t nat -D POSTROUTING -s ${WG_IPV6_CIDR} -j MASQUERADE;"
+fi
+
 DB_FILE="/etc/wireguard/wg-easy.db"
 WG_JSON="/etc/wireguard/wg0.json"
 
@@ -128,7 +143,7 @@ update_db() {
     sqlite3 "$DB_FILE" "UPDATE hooks_table SET post_up='${post_up}', post_down='${post_down}' WHERE id='wg0';"
 
     # Update interface port and CIDR
-    sqlite3 "$DB_FILE" "UPDATE interfaces_table SET port=${WG_PORT}, ipv4_cidr='${WG_IPV4_CIDR}', mtu=${MTU} WHERE name='wg0';"
+    sqlite3 "$DB_FILE" "UPDATE interfaces_table SET port=${WG_PORT}, ipv4_cidr='${WG_IPV4_CIDR}', ipv6_cidr='${WG_IPV6_CIDR}', mtu=${MTU} WHERE name='wg0';"
 
     # Update user config (allowed IPs, DNS, host, port, persistent keepalive)
     sqlite3 "$DB_FILE" "UPDATE user_configs_table SET default_allowed_ips='${ALLOWED_IPS_JSON}', default_dns='${DNS_JSON}', default_mtu=${MTU}, host='${host_val}', port=${WG_PORT} WHERE id='wg0';"

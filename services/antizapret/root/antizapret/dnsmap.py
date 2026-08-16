@@ -7,11 +7,11 @@ import atexit, base64, http.client, os, queue, re, signal, socket, struct, subpr
 from urllib.parse import quote
 
 from collections import deque, namedtuple
-from ipaddress import IPv4Network
+from ipaddress import IPv4Network, IPv6Network
 
 import maxminddb
 
-from dnslib import DNSRecord, RCODE, QTYPE, A
+from dnslib import DNSRecord, RCODE, QTYPE, A, AAAA
 from dnslib.server import DNSServer, DNSHandler, BaseResolver, DNSLogger
 
 
@@ -56,6 +56,7 @@ class ProxyResolver(BaseResolver):
 
     def __init__(self,address,port,doh_port,timeout,iprange,client_id,
                  resolver_client_id,asn_file,asn_database,tablename='dnsmap',
+                 iprange6=None, tablename6='dnsmap6',
                  asn_database_reader=None, iptables_runner=None,
                  connection_factory=None, load_existing_mappings=True):
         self.address = address
@@ -86,7 +87,14 @@ class ProxyResolver(BaseResolver):
         self.tablename = tablename
         self.mapping_lock = threading.RLock()
 
-        # Load existing mappings
+        # IPv6 fake IP mapping support
+        self.iprange6 = IPv6Network(iprange6) if iprange6 else None
+        self.unassigned_addresses6 = self.new_unassigned_addresses6() if self.iprange6 else None
+        self.ipmap6 = {}
+        self.tablename6 = tablename6
+        self.mapping_lock6 = threading.RLock()
+
+        # Load existing IPv4 mappings
         if load_existing_mappings:
             get_mappings = "iptables -w -t nat -nL dnsmap | awk '{if (NR<3) {next}; sub(/to:/, \"\", $6); print $5,$6}'"
             output = subprocess.check_output(get_mappings, shell=True, encoding='utf-8')
@@ -95,6 +103,19 @@ class ProxyResolver(BaseResolver):
                     fake_addr, real_addr = mapped.split(' ')
                     if not self.add_mapping(real_addr, fake_addr):
                         print("ERROR: Failed to load mapping {} to {}, ignoring".format(fake_addr, real_addr))
+        
+        # Load existing IPv6 mappings
+        if load_existing_mappings and self.iprange6:
+            get_mappings6 = "ip6tables -w -t nat -nL dnsmap6 | awk '{if (NR<3) {next}; sub(/to:/, \"\", $6); print $5,$6}'"
+            try:
+                output = subprocess.check_output(get_mappings6, shell=True, encoding='utf-8')
+                for mapped in output.split("\n"):
+                    if mapped:
+                        fake_addr, real_addr = mapped.split(' ')
+                        if not self.add_mapping6(real_addr, fake_addr):
+                            print("ERROR: Failed to load IPv6 mapping {} to {}, ignoring".format(fake_addr, real_addr))
+            except subprocess.CalledProcessError:
+                pass  # Chain might not exist yet
         #self.unassigned_addresses.remove()
 
     @staticmethod
@@ -339,13 +360,143 @@ class ProxyResolver(BaseResolver):
                 return fake_addr
             return True
 
+    def new_unassigned_addresses6(self):
+        if not self.iprange6:
+            return None
+        addresses = deque([str(address) for address in self.iprange6.hosts()])
+        # Preserve the first address from the range for DNS.
+        try:
+            addresses.popleft()
+        except IndexError as error:
+            raise ValueError('IPv6 range has no addresses available for mappings') from error
+        if not addresses:
+            raise ValueError('IPv6 range has no addresses available for mappings')
+        return addresses
+
+    def reset_mappings6(self):
+        if not self.iprange6:
+            return True
+        command = ['ip6tables', '-w', '-t', 'nat', '-F', self.tablename6]
+        try:
+            result = self.iptables_runner(command, capture_output=True, text=True)
+        except OSError as error:
+            print('ERROR: Failed to flush IPv6 mappings: {}'.format(error))
+            return False
+        if result.returncode != 0:
+            print('ERROR: Failed to flush IPv6 mappings: {}'.format(result.stderr.strip()))
+            return False
+
+        self.ipmap6.clear()
+        self.unassigned_addresses6 = self.new_unassigned_addresses6()
+        print('Fake IPv6 address range exhausted. All mappings were cleared.')
+        return True
+
+    def get_mapping6(self, real_addr):
+        return self.ipmap6.get(real_addr)
+
+    def add_mapping6(self, real_addr, fake_addr=None):
+        if not self.iprange6:
+            return False
+        with self.mapping_lock6:
+            existing_fake_addr = self.get_mapping6(real_addr)
+            if existing_fake_addr:
+                if fake_addr:
+                    print("ERROR: Real IPv6 addr {} is already mapped to {}, ignoring duplicate mapping to {}".format(
+                        real_addr, existing_fake_addr, fake_addr
+                    ))
+                    return True
+                return existing_fake_addr
+
+            if fake_addr:
+                try:
+                    self.unassigned_addresses6.remove(fake_addr)
+                    self.ipmap6[real_addr]=fake_addr
+                    print('Mapping IPv6 {} to {}'.format(fake_addr, real_addr))
+                except ValueError:
+                    print("ERROR: Fake IPv6 addr {} not in unassigned addresses list".format(fake_addr))
+                    return False
+            else:
+                try:
+                    fake_addr = self.unassigned_addresses6.popleft()
+                except IndexError:
+                    if not self.reset_mappings6():
+                        return False
+                    fake_addr = self.unassigned_addresses6.popleft()
+                command = [
+                    'ip6tables', '-w', '-t', 'nat', '-A', self.tablename6,
+                    '-d', fake_addr, '-j', 'DNAT', '--to', real_addr,
+                ]
+                try:
+                    result = self.iptables_runner(command, capture_output=True, text=True)
+                except OSError as error:
+                    self.unassigned_addresses6.appendleft(fake_addr)
+                    print('ERROR: Failed to execute ip6tables: {}'.format(error))
+                    return False
+                if result.returncode != 0:
+                    self.unassigned_addresses6.appendleft(fake_addr)
+                    print('ERROR: Failed to add IPv6 mapping {} to {}: {}'.format(
+                        fake_addr, real_addr, result.stderr.strip()
+                    ))
+                    return False
+                print('Mapping IPv6 {} to {}'.format(fake_addr, real_addr))
+                self.ipmap6[real_addr]=fake_addr
+                return fake_addr
+            return True
+
     def resolve(self,request,handler):
         try:
             reply = self.query_doh(request, self.client_id)
 
-            if request.q.qtype == QTYPE.AAAA or request.q.qtype == QTYPE.HTTPS:
-                print('GOT AAAA or HTTPS')
+            if request.q.qtype == QTYPE.HTTPS:
+                print('GOT HTTPS')
                 reply = request.reply()
+                return reply
+
+            if request.q.qtype == QTYPE.AAAA:
+                print('GOT AAAA')
+                # For AAAA queries, check if we should apply split-routing
+                # Similar to A query handling, but for IPv6
+                if reply.header.rcode == RCODE.SERVFAIL:
+                    filtered_reply = reply
+                    resolved_reply = self.query_doh(request, self.resolver_client_id)
+                    if resolved_reply.header.rcode != RCODE.NOERROR:
+                        return resolved_reply
+                    real_addresses = [
+                        str(record.rdata)
+                        for record in resolved_reply.rr
+                        if record.rtype == QTYPE.AAAA
+                    ]
+                    if not any(self.is_blocked_asn(address) for address in real_addresses):
+                        return filtered_reply
+                    reply = resolved_reply
+
+                if not any(record.rtype == QTYPE.AAAA for record in reply.rr):
+                    return reply
+
+                newrr = []
+                for record in reply.rr:
+                    if record.rtype == QTYPE.CNAME:
+                        continue
+                    newrr.append(record)
+                reply.rr = newrr
+
+                for record in reply.rr:
+                    if record.rtype != QTYPE.AAAA:
+                        continue
+
+                    real_addr = str(record.rdata)
+                    fake_addr = self.get_mapping6(real_addr)
+                    if not fake_addr:
+                        fake_addr = self.add_mapping6(real_addr)
+                    if not fake_addr:
+                        print("No fake IPv6 addr, something went wrong!")
+                        reply = request.reply()
+                        reply.header.rcode = getattr(RCODE,'SERVFAIL')
+                        return reply
+
+                    record.rdata = AAAA(fake_addr)
+                    record.rname = request.q.qname
+                    record.ttl = 300
                 return reply
 
             if request.q.qtype == QTYPE.A:
@@ -497,6 +648,9 @@ if __name__ == '__main__':
     p.add_argument("--iprange", default="14.16.0.0/16",
                    metavar="<ip/mask>",
                    help="Fake IP range (default: 14.16.0.0/16)")
+    p.add_argument("--iprange6", default=os.getenv('AZ_FAKE_IPV6_SUBNET', 'fdcc:ad94:bacf:61a5::/64'),
+                   metavar="<ip/mask>",
+                   help="Fake IPv6 range (default: fdcc:ad94:bacf:61a5::/64)")
     p.add_argument("--client-id", default=os.getenv('CLIENT', 'az-local'),
                    help="AdGuard client ID used for filtered requests")
     p.add_argument("--resolver-client-id", default="az-resolver",
@@ -517,7 +671,8 @@ if __name__ == '__main__':
 
     resolver = ProxyResolver(args.dns,args.dns_port,args.doh_port,args.timeout,args.iprange,
                              args.client_id,args.resolver_client_id,
-                             args.asn_file,args.asn_database)
+                             args.asn_file,args.asn_database,
+                             iprange6=args.iprange6, tablename6='dnsmap6')
     atexit.register(resolver.close)
     signal.signal(signal.SIGHUP, resolver.request_asn_reload)
     handler = PassthroughDNSHandler if args.passthrough else DNSHandler

@@ -2,7 +2,7 @@ services:
   base:
     init: true
     restart: unless-stopped
-    image: xtrime/antizapret-vpn-wireguard:6.8.0
+    image: xtrime/antizapret-vpn-wireguard:6.9.0
     build:
       context: .
       args:
@@ -31,6 +31,8 @@ services:
     sysctls:
       - net.ipv4.ip_forward=1
       - net.ipv4.conf.all.src_valid_mark=1
+      - net.ipv6.conf.all.forwarding=1
+      - net.ipv6.conf.all.disable_ipv6=0
     depends_on:
       - az-local
     volumes:
@@ -45,10 +47,12 @@ services:
     environment:
       - PORT=51821
       - INSECURE=true
-      - DISABLE_IPV6=true
+      - DISABLE_IPV6=false
       - WG_PORT=51820
       - MTU=1280
       - WG_DEFAULT_DNS=14.16.0.1
+      - WG_IPV6_CIDR=fdcc:ad94:bacf:61a4::cafe:0/112
+      - WG_IPV6_DNS=fdcc:ad94:bacf:61a4::cafe:1
       - AZ_SUBNET=14.16.0.0/14
       - WG_PERSISTENT_KEEPALIVE=25
       - BGP_ENABLE=false
@@ -61,3 +65,6 @@ services:
         adguard:14.16.0.1;
         az-local:14.16.0.0/15;
         az-world:14.18.0.0/15;
+        az-local-v6:fdcc:ad94:bacf:61a4::/64;
+        az-world-v6:fdcc:ad94:bacf:61a5::/64;
+        az-fake-v6:fdcc:ad94:bacf:61a5::/64;
