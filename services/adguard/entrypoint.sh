@@ -92,10 +92,14 @@ cat > "$YQ_FILTER" << YQEOF
     .users[0].name="${ADGUARDHOME_USERNAME}" |
     .users[0].password="${ADGUARDHOME_PASSWORD_HASH}" |
     (.clients.persistent[] | select(.name == "az-local") | .ids) = ["az-local", "${AZ_LOCAL_HOST}"] |
+    (.clients.persistent[] | select(.name == "az-local") | .id) = "az-local" |
     (.clients.persistent[] | select(.name == "az-world") | .ids) = ${AZ_WORLD_CLIENT_IDS} |
+    (.clients.persistent[] | select(.name == "az-world") | .id) = "az-world" |
     (.clients.persistent[] | select(.name == "coredns") | .ids) = ["${COREDNS_HOST}"] |
+    (.clients.persistent[] | select(.name == "coredns") | .id) = "coredns" |
     .clients.persistent = (
       [.clients.persistent[] | select(.name != "az-resolver")] + [{
+        "id": "az-resolver",
         "name": "az-resolver",
         "ids": ["az-resolver"],
         "tags": [],

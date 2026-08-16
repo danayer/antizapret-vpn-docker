@@ -70,25 +70,29 @@ dns:
   hostsfile_enabled: true
   clients:
     persistent:
-      - name: az-local
+      - id: "az-local"
+        name: az-local
         ids: []
         tags: []
         upstreams: []
         use_global_settings: false
         use_global_blocked_services: false
-      - name: az-world
+      - id: "az-world"
+        name: az-world
         ids: []
         tags: []
         upstreams: []
         use_global_settings: false
         use_global_blocked_services: false
-      - name: coredns
+      - id: "coredns"
+        name: coredns
         ids: []
         tags: []
         upstreams: []
         use_global_settings: false
         use_global_blocked_services: false
-      - name: az-resolver
+      - id: "az-resolver"
+        name: az-resolver
         ids: ["az-resolver"]
         tags: []
         upstreams: ["1.1.1.1", "8.8.8.8", "8.8.4.4", "9.9.9.11", "149.112.112.11"]
