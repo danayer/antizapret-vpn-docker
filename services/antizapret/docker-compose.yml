@@ -16,7 +16,8 @@ services:
       - "xtrime-ru.github.io=185.199.110.153"
       - "adguardteam.github.io=185.199.110.153"
     build: 
-      context: .
+      context: ..
+      dockerfile: services/antizapret/Dockerfile
       x-bake:
         platforms:
           - linux/amd64
