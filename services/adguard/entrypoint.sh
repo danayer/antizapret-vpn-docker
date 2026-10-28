@@ -81,6 +81,17 @@ function ensure_filter () {
 ensure_filter 'http://az-local.antizapret/list/?regex=1&allow=0&client=az-resolver&filter_custom=0&filter_dist=0&file=/root/antizapret/config/custom/exclude-hosts-custom.txt' 'Excluded Custom Local Rules'
 ensure_filter 'http://az-world.antizapret/list/?regex=1&allow=0&client=az-resolver&filter_custom=0&filter_dist=0&file=/root/antizapret/config/custom/exclude-hosts-custom.txt' 'Excluded Custom World Rules'
 
+# IPv6 Egress allowlists: resolving rules for az-ipv6-local and az-ipv6-world clients.
+# These add @@||domain^$dnsrewrite=127.0.0.1,client=az-ipv6-* rules that override
+# the catch-all ||*^$dnsrewrite=SERVFAIL,client=az-ipv6-* in user_rules.
+# Only the Local filter is added in Compose mode; the World filter requires
+# az-world (Swarm mode, AZ_WORLD_ENABLED=1).
+ensure_filter 'http://az-local.antizapret/list/?regex=1&allow=1&client=az-ipv6-local&filter_custom=0&filter_dist=0&file=/root/antizapret/config/ipv6-egress-domains-local.txt&dnsrewrite=127.0.0.1&suffix=1' 'IPv6 Egress Local Rules'
+
+if [ "$AZ_WORLD_ENABLED" = "1" ]; then
+    ensure_filter 'http://az-world.antizapret/list/?regex=1&allow=1&client=az-ipv6-world&filter_custom=0&filter_dist=0&file=/root/antizapret/config/ipv6-egress-domains-world.txt&dnsrewrite=127.0.0.1&suffix=1' 'IPv6 Egress World Rules'
+fi
+
 # AdGuard's migration to schema 34 replaces http.doh with the legacy TLS flag.
 # Set that flag before startup; let AdGuard migrate the remaining configuration.
 ADGUARD_SCHEMA_VERSION=$(yq '.schema_version // 0' /opt/adguardhome/conf/AdGuardHome.yaml) || exit 1
