@@ -231,7 +231,7 @@ services:
   az-local:
     environment:
       - IPV6_EGRESS_LOCAL_ENABLED=1
-      - IPV6_EGRESS_LOCAL_FILE=/root/antizapret/config/ipv6-egress-domains-local.txt
+      - IPV6_EGRESS_LOCAL_FILE=/root/antizapret/config/custom/ipv6-egress-domains-local.txt
       - IPV6_TRANSLATOR_LOCAL_PORT=9000
 ```
 
@@ -246,7 +246,7 @@ services:
   az-local:
     environment:
       - IPV6_EGRESS_LOCAL_ENABLED=1
-      - IPV6_EGRESS_LOCAL_FILE=/root/antizapret/config/ipv6-egress-domains-local.txt
+      - IPV6_EGRESS_LOCAL_FILE=/root/antizapret/config/custom/ipv6-egress-domains-local.txt
       - IPV6_TRANSLATOR_LOCAL_PORT=9000
   az-world:
     environment:
@@ -263,7 +263,7 @@ services:
   az-world:
     environment:
       - IPV6_EGRESS_WORLD_ENABLED=1
-      - IPV6_EGRESS_WORLD_FILE=/root/antizapret/config/ipv6-egress-domains-world.txt
+      - IPV6_EGRESS_WORLD_FILE=/root/antizapret/config/custom/ipv6-egress-domains-world.txt
       - IPV6_TRANSLATOR_WORLD_PORT=9000
 ```
 
@@ -274,18 +274,18 @@ services:
   az-local:
     environment:
       - IPV6_EGRESS_LOCAL_ENABLED=1
-      - IPV6_EGRESS_LOCAL_FILE=/root/antizapret/config/ipv6-egress-domains-local.txt
+      - IPV6_EGRESS_LOCAL_FILE=/root/antizapret/config/custom/ipv6-egress-domains-local.txt
       - IPV6_TRANSLATOR_LOCAL_PORT=9000
   az-world:
     environment:
       - IPV6_EGRESS_WORLD_ENABLED=1
-      - IPV6_EGRESS_WORLD_FILE=/root/antizapret/config/ipv6-egress-domains-world.txt
+      - IPV6_EGRESS_WORLD_FILE=/root/antizapret/config/custom/ipv6-egress-domains-world.txt
       - IPV6_TRANSLATOR_WORLD_PORT=9000
 ```
 
 ### Step 3: Create domain files (optional fallback)
 
-Example domain files are provided in `config/antizapret/`:
+Example domain files are provided in `config/antizapret/custom/`:
 
 - `ipv6-egress-domains-local.txt` — for az-local
 - `ipv6-egress-domains-world.txt` — for az-world

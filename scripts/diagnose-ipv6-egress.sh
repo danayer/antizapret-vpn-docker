@@ -309,9 +309,9 @@ fi
 
 section "IPv6 egress configuration files"
 
-HOST_DOMAINS_FILE="config/antizapret/ipv6-egress-domains-local.txt"
+HOST_DOMAINS_FILE="config/antizapret/custom/ipv6-egress-domains-local.txt"
 HOST_MAPPINGS_FILE="config/antizapret/result/ipv6-egress-mappings-local.txt"
-CONTAINER_DOMAINS_FILE="/root/antizapret/config/ipv6-egress-domains-local.txt"
+CONTAINER_DOMAINS_FILE="/root/antizapret/config/custom/ipv6-egress-domains-local.txt"
 CONTAINER_MAPPINGS_FILE="/root/antizapret/result/ipv6-egress-mappings-local.txt"
 
 echo "host domains file:    $HOST_DOMAINS_FILE"

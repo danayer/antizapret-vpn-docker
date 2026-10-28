@@ -39,8 +39,8 @@ services:
       - $PWD/config/antizapret/iptables:/root/antizapret/iptables
       - $PWD/config/antizapret/warp:/var/lib/cloudflare-warp
       - $PWD/config/antizapret/zapret2:/opt/zapret2/config
-      - $PWD/config/antizapret/ipv6-egress-domains-local.txt:/root/antizapret/config/ipv6-egress-domains-local.txt
-      - $PWD/config/antizapret/ipv6-egress-domains-world.txt:/root/antizapret/config/ipv6-egress-domains-world.txt
+      - $PWD/config/antizapret/custom/ipv6-egress-domains-local.txt:/root/antizapret/config/ipv6-egress-domains-local.txt
+      - $PWD/config/antizapret/custom/ipv6-egress-domains-world.txt:/root/antizapret/config/ipv6-egress-domains-world.txt
       - $PWD/config/adguard/conf:/opt/adguardhome/conf
       - $PWD/config/adguard/work:/opt/adguardhome/work
     environment:

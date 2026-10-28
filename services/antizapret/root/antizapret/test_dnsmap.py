@@ -2162,7 +2162,7 @@ class UDPServerSetupTests(unittest.TestCase):
                         '127.0.0.1', port,
                         ipv6_translator.MappingTable(
                             str(self.repo_root / 'config' / 'antizapret' /
-                                'ipv6-egress-domains-local.txt')),
+                                'custom' / 'ipv6-egress-domains-local.txt')),
                         ipv6_translator.UpstreamUDPSocketPool())
                 except OSError:
                     pass
@@ -2311,10 +2311,10 @@ class ComposeNetworkTests(unittest.TestCase):
     def test_domains_file_bind_mount_path(self):
         mounts = [v for v in self.az_local_volumes if 'ipv6-egress-domains-local.txt' in v]
         self.assertTrue(any(
-            'config/antizapret/ipv6-egress-domains-local.txt' in v and
+            'config/antizapret/custom/ipv6-egress-domains-local.txt' in v and
             '/root/antizapret/config/ipv6-egress-domains-local.txt' in v
             for v in mounts
-        ), 'expected bind mount config/antizapret/ipv6-egress-domains-local.txt -> /root/antizapret/config/ipv6-egress-domains-local.txt')
+        ), 'expected bind mount config/antizapret/custom/ipv6-egress-domains-local.txt -> /root/antizapret/config/ipv6-egress-domains-local.txt')
 
     def test_mappings_file_reachable_via_result_volume(self):
         self.assertTrue(any(

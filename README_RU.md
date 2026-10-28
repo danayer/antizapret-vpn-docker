@@ -1443,7 +1443,7 @@ services:
   az-local:
     environment:
       - IPV6_EGRESS_LOCAL_ENABLED=1
-      - IPV6_EGRESS_LOCAL_FILE=/root/antizapret/config/ipv6-egress-domains-local.txt
+      - IPV6_EGRESS_LOCAL_FILE=/root/antizapret/config/custom/ipv6-egress-domains-local.txt
       - IPV6_EGRESS_LOCAL_MODE=adguard_only
       - IPV6_TRANSLATOR_LOCAL_PORT=9000
 ```
@@ -1452,7 +1452,7 @@ services:
 
 #### Шаг 3: Файлы доменов (опциональный fallback)
 
-Примеры файлов доменов находятся в `config/antizapret/`:
+Примеры файлов доменов находятся в `config/antizapret/custom/`:
 
 - `ipv6-egress-domains-local.txt` — для az-local
 - `ipv6-egress-domains-world.txt` — для az-world
