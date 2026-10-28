@@ -143,11 +143,14 @@ func TestAdaptListIPv6EgressLocalAllowRule(t *testing.T) {
 	}
 
 	body := response.Body.String()
-	if !strings.Contains(body, "@@||example.com^$dnsrewrite=SERVFAIL,client=az-ipv6-local") {
+	if !strings.Contains(body, "@@||example.com^$dnsrewrite,client=az-ipv6-local") {
 		t.Fatalf("expected local allow rule for example.com, got: %q", body)
 	}
-	if !strings.Contains(body, "@@||api64.ipify.org^$dnsrewrite=SERVFAIL,client=az-ipv6-local") {
+	if !strings.Contains(body, "@@||api64.ipify.org^$dnsrewrite,client=az-ipv6-local") {
 		t.Fatalf("expected local allow rule for api64.ipify.org, got: %q", body)
+	}
+	if strings.Contains(body, "dnsrewrite=SERVFAIL") {
+		t.Fatalf("IPv6 Egress allowlist must not contain dnsrewrite=SERVFAIL, got: %q", body)
 	}
 	if strings.Contains(body, "dnsrewrite=127.0.0.1") {
 		t.Fatalf("IPv6 Egress allowlist must not contain dnsrewrite=127.0.0.1, got: %q", body)
@@ -175,11 +178,14 @@ func TestAdaptListIPv6EgressWorldAllowRule(t *testing.T) {
 	}
 
 	body := response.Body.String()
-	if !strings.Contains(body, "@@||example.org^$dnsrewrite=SERVFAIL,client=az-ipv6-world") {
+	if !strings.Contains(body, "@@||example.org^$dnsrewrite,client=az-ipv6-world") {
 		t.Fatalf("expected world allow rule for example.org, got: %q", body)
 	}
-	if !strings.Contains(body, "@@||api64.ipify.org^$dnsrewrite=SERVFAIL,client=az-ipv6-world") {
+	if !strings.Contains(body, "@@||api64.ipify.org^$dnsrewrite,client=az-ipv6-world") {
 		t.Fatalf("expected world allow rule for api64.ipify.org, got: %q", body)
+	}
+	if strings.Contains(body, "dnsrewrite=SERVFAIL") {
+		t.Fatalf("IPv6 Egress allowlist must not contain dnsrewrite=SERVFAIL, got: %q", body)
 	}
 	if strings.Contains(body, "dnsrewrite=127.0.0.1") {
 		t.Fatalf("IPv6 Egress allowlist must not contain dnsrewrite=127.0.0.1, got: %q", body)
@@ -296,8 +302,11 @@ func TestAdaptListIPv6EgressCommentsAndBlankLinesIgnored(t *testing.T) {
 
 	body := response.Body.String()
 	// Only one rule should be generated (for example.com)
-	count := strings.Count(body, "@@||example.com^$dnsrewrite=SERVFAIL,client=az-ipv6-local")
+	count := strings.Count(body, "@@||example.com^$dnsrewrite,client=az-ipv6-local")
 	if count != 1 {
 		t.Fatalf("expected exactly 1 allow rule for example.com, got %d: %q", count, body)
+	}
+	if strings.Contains(body, "dnsrewrite=SERVFAIL") {
+		t.Fatalf("IPv6 Egress allowlist must not contain dnsrewrite=SERVFAIL, got: %q", body)
 	}
 }

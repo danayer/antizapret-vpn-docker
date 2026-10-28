@@ -371,7 +371,12 @@ func adaptList(w http.ResponseWriter, r *http.Request) {
 					suffix := ""
 
 					if len(req.DnsRewrite) > 0 {
-						suffix = fmt.Sprintf("$dnsrewrite=%s", req.DnsRewrite)
+						if req.Allow {
+							// Allow rules: $dnsrewrite without value cancels the catch-all SERVFAIL rule.
+							suffix = "$dnsrewrite"
+						} else {
+							suffix = fmt.Sprintf("$dnsrewrite=%s", req.DnsRewrite)
+						}
 					}
 
 					if len(req.Client) > 0 {
