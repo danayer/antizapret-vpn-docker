@@ -469,12 +469,12 @@ class MappingTests(ResolverTestCase):
 
     def test_iptables_success_commits_mapping(self):
         resolver = self.make_resolver()
-        resolver.pending_mappings = self.TrackingDict()
+        resolver.ipv4_pending_mappings = self.TrackingDict()
 
         self.assertEqual(resolver.add_mapping('192.0.2.1'), '14.16.0.2')
 
         self.assertEqual(resolver.get_mapping('192.0.2.1'), '14.16.0.2')
-        self.assertTrue(resolver.pending_mappings.was_cleared)
+        self.assertTrue(resolver.ipv4_pending_mappings.was_cleared)
         command = self.iptables_runner.call_args.args[0]
         self.assertEqual(command, ['iptables-restore', '--wait', '--noflush'])
         self.assertIn(
@@ -2172,6 +2172,212 @@ class ComposeNetworkTests(unittest.TestCase):
             'config/antizapret/result' in v and '/root/antizapret/result' in v
             for v in self.az_local_volumes
         ), 'expected result volume config/antizapret/result -> /root/antizapret/result (holds ipv6-egress-mappings-local.txt)')
+
+
+class IPv6EgressIsolationTests(ResolverTestCase):
+    """Regression tests for IPv4/IPv6 mapping isolation.
+
+    Verifies that IPv4 and IPv6 egress mapping handlers use separate state
+    and cannot contaminate each other's batches, pools, or iptables rules.
+    """
+
+    def make_ipv6_resolver(self, **overrides):
+        """Create a resolver with IPv6 egress enabled."""
+        arguments = {
+            'address': 'adguard',
+            'port': 53,
+            'doh_port': 3000,
+            'timeout': 1,
+            'iprange': '14.16.0.0/29',
+            'client_id': 'az-local',
+            'resolver_client_id': 'az-resolver',
+            'asn_file': str(self.asn_file),
+            'asn_database': '/unused.mmdb',
+            'asn_database_reader': self.asn_database,
+            'iptables_runner': self.iptables_runner,
+            'load_existing_mappings': False,
+            'mapping_batch_delay': 0.001,
+            'ipv6_egress_file': str(self.temp_directory.name + '/ipv6-egress.txt'),
+            'ipv6_translator_port': 9000,
+            'ipv6_egress_client_id': 'az-ipv6-local',
+            'ipv6_egress_enabled': True,
+            'ipv6_egress_mode': 'file_only',
+            'ipv6_mapping_file': str(self.temp_directory.name + '/ipv6-egress-mappings.txt'),
+        }
+        arguments.update(overrides)
+        resolver = dnsmap.ProxyResolver(**arguments)
+        self.addCleanup(resolver.close)
+        return resolver
+
+    def test_ipv4_mapping_creates_correct_dnat_rule(self):
+        """Ordinary IPv4 request creates correct IPv4 DNAT mapping."""
+        resolver = self.make_resolver(ipv6_egress_enabled=False)
+
+        result = resolver.add_mapping('192.0.2.1')
+
+        self.assertEqual(result, '14.16.0.2')
+        self.assertEqual(resolver.get_mapping('192.0.2.1'), '14.16.0.2')
+
+        # Check iptables rule was created for IPv4 mapping (no protocol, no translator port)
+        input_rules = self.iptables_runner.call_args.kwargs['input']
+        self.assertIn(
+            '-A dnsmap -d 14.16.0.2 -j DNAT --to-destination 192.0.2.1',
+            input_rules,
+        )
+        # IPv4 rule must NOT reference the translator port
+        self.assertNotIn('127.0.0.1:9000', input_rules)
+
+    def test_ipv6_egress_mapping_creates_translator_dnat_rule(self):
+        """IPv6 Egress request creates virtual IPv4 and translator DNAT rule."""
+        ipv6_file = Path(self.temp_directory.name) / 'ipv6-egress.txt'
+        ipv6_file.write_text('example.com\n', encoding='utf-8')
+
+        resolver = self.make_ipv6_resolver()
+
+        result = resolver.add_ipv6_mapping('2001:db8::1')
+
+        self.assertEqual(result, '14.16.0.2')
+        self.assertEqual(resolver.get_ipv6_mapping_by_real('2001:db8::1'), '14.16.0.2')
+
+        # Check iptables rules were created for IPv6 egress (both tcp and udp to translator)
+        input_rules = self.iptables_runner.call_args.kwargs['input']
+        self.assertIn(
+            '-A dnsmap-ipv6 -p tcp -d 14.16.0.2 -j DNAT --to-destination 127.0.0.1:9000',
+            input_rules,
+        )
+        self.assertIn(
+            '-A dnsmap-ipv6 -p udp -d 14.16.0.2 -j DNAT --to-destination 127.0.0.1:9000',
+            input_rules,
+        )
+        # IPv6 egress rule must NOT contain the real IPv6 address as a destination
+        self.assertNotIn('2001:db8::1', input_rules)
+
+    def test_ipv4_and_ipv6_concurrent_no_batch_mixing(self):
+        """IPv4 and IPv6 concurrent requests do not mix batches or double-allocate."""
+        ipv6_file = Path(self.temp_directory.name) / 'ipv6-egress.txt'
+        ipv6_file.write_text('example.com\n', encoding='utf-8')
+
+        # Use a larger range so both IPv4 and IPv6 pools have addresses.
+        arguments = {
+            'address': 'adguard',
+            'port': 53,
+            'doh_port': 3000,
+            'timeout': 1,
+            'iprange': '14.16.0.0/27',
+            'client_id': 'az-local',
+            'resolver_client_id': 'az-resolver',
+            'asn_file': str(self.asn_file),
+            'asn_database': '/unused.mmdb',
+            'asn_database_reader': self.asn_database,
+            'iptables_runner': self.iptables_runner,
+            'load_existing_mappings': False,
+            'mapping_batch_delay': 0.001,
+            'ipv6_egress_file': str(self.temp_directory.name + '/ipv6-egress.txt'),
+            'ipv6_translator_port': 9000,
+            'ipv6_egress_client_id': 'az-ipv6-local',
+            'ipv6_egress_enabled': True,
+            'ipv6_egress_mode': 'file_only',
+            'ipv6_mapping_file': str(self.temp_directory.name + '/ipv6-egress-mappings.txt'),
+            'ipv6_egress_reserve_count': 2,
+        }
+        resolver = dnsmap.ProxyResolver(**arguments)
+        self.addCleanup(resolver.close)
+        barrier = threading.Barrier(5)  # 4 worker threads + 1 main thread
+
+        def add_ipv4(address):
+            barrier.wait()
+            return resolver.add_mapping(address)
+
+        def add_ipv6(addr):
+            barrier.wait()
+            return resolver.add_ipv6_mapping(addr)
+
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            futures = [
+                executor.submit(add_ipv4, '192.0.2.1'),
+                executor.submit(add_ipv4, '192.0.2.2'),
+                executor.submit(add_ipv6, '2001:db8::1'),
+                executor.submit(add_ipv6, '2001:db8::2'),
+            ]
+            barrier.wait()
+            results = [f.result() for f in futures]
+
+        # All allocations should succeed with distinct addresses
+        self.assertEqual(len(results), 4)
+        self.assertEqual(len(set(results)), 4, 'Double address allocation detected')
+
+        # IPv4 mappings use add_mappings table (dnsmap), IPv6 uses dnsmap-ipv6
+        self.assertEqual(resolver.get_mapping('192.0.2.1'), results[0])
+        self.assertEqual(resolver.get_mapping('192.0.2.2'), results[1])
+        self.assertEqual(resolver.get_ipv6_mapping_by_real('2001:db8::1'), results[2])
+        self.assertEqual(resolver.get_ipv6_mapping_by_real('2001:db8::2'), results[3])
+
+        # No address should appear in both IPv4 and IPv6 mappings
+        ipv4_fakes = set(resolver.ipmap.values())
+        ipv6_fakes = set(resolver.ipv6_mappings.values())
+        self.assertEqual(len(ipv4_fakes & ipv6_fakes), 0,
+                         'Address leaked between IPv4 and IPv6 pools')
+
+    def test_ipv6_iptables_failure_returns_address_to_ipv6_pool(self):
+        """When iptables-restore fails, IPv6 fake address returns to IPv6 pool."""
+        ipv6_file = Path(self.temp_directory.name) / 'ipv6-egress.txt'
+        ipv6_file.write_text('example.com\n', encoding='utf-8')
+
+        # Make iptables-restore fail
+        self.iptables_runner.return_value = Mock(returncode=1, stderr='Bad IP address')
+
+        resolver = self.make_ipv6_resolver()
+
+        # Capture the IPv6 pool state before the failure
+        ipv6_pool_before = list(resolver.ipv6_unassigned_addresses)
+
+        result = resolver.add_ipv6_mapping('2001:db8::1')
+
+        # The mapping should fail (return None)
+        self.assertIsNone(result)
+        # The address should NOT be in ipv6_mappings
+        self.assertNotIn('2001:db8::1', resolver.ipv6_mappings)
+        # The fake address should be back in the IPv6 egress pool, not the IPv4 pool
+        self.assertNotIn(result if result else '14.16.0.2', resolver.unassigned_addresses)
+        # The IPv6 pool should have the address back
+        ipv6_pool_after = list(resolver.ipv6_unassigned_addresses)
+        self.assertEqual(len(ipv6_pool_after), len(ipv6_pool_before),
+                         'IPv6 egress pool should retain the failed address')
+
+    def test_ipv6_repeat_request_uses_existing_mapping(self):
+        """Repeat request for already registered IPv6 address uses existing mapping."""
+        ipv6_file = Path(self.temp_directory.name) / 'ipv6-egress.txt'
+        ipv6_file.write_text('example.com\n', encoding='utf-8')
+
+        resolver = self.make_ipv6_resolver()
+
+        # First allocation
+        result1 = resolver.add_ipv6_mapping('2001:db8::1')
+        self.assertIsNotNone(result1)
+
+        # Second request for same IPv6 should reuse the mapping
+        result2 = resolver.add_ipv6_mapping('2001:db8::1')
+        self.assertEqual(result2, result1)
+
+        # Only one iptables-restore call should have been made
+        self.assertEqual(self.iptables_runner.call_count, 1)
+
+    def test_close_stops_all_batch_handlers(self):
+        """On close, mapping_stopping is set and batch runner flags are cleared."""
+        ipv6_file = Path(self.temp_directory.name) / 'ipv6-egress.txt'
+        ipv6_file.write_text('example.com\n', encoding='utf-8')
+
+        resolver = self.make_ipv6_resolver()
+
+        # Initially no batch runners are active
+        self.assertFalse(resolver.ipv4_mapping_batch_running)
+        self.assertFalse(resolver.ipv6_mapping_batch_running)
+
+        resolver.close()
+
+        self.assertTrue(resolver.mapping_stopping)
+        self.assertFalse(resolver.ipv4_mapping_batch_running)
+        self.assertFalse(resolver.ipv6_mapping_batch_running)
 
 
 if __name__ == '__main__':

@@ -102,10 +102,16 @@ class ProxyResolver(BaseResolver):
         self.tablename = tablename
         self.mapping_lock = threading.RLock()
         self.mapping_condition = threading.Condition(self.mapping_lock)
-        self.pending_mappings = {}
-        self.mapping_batch = []
+        # Separate state for IPv4 and IPv6 mapping handlers to prevent
+        # cross-contamination: IPv4 addresses must never appear in IPv6
+        # iptables rules and vice versa.
+        self.ipv4_pending_mappings = {}
+        self.ipv6_pending_mappings = {}
+        self.ipv4_mapping_batch = []
+        self.ipv6_mapping_batch = []
         self.mapping_batch_delay = mapping_batch_delay
-        self.mapping_batch_running = False
+        self.ipv4_mapping_batch_running = False
+        self.ipv6_mapping_batch_running = False
         self.mapping_stopping = False
 
         # IPv6 egress support
@@ -486,7 +492,7 @@ class ProxyResolver(BaseResolver):
             new_addresses = [
                 addr for addr in unique
                 if addr not in self.ipv6_mappings
-                and addr not in self.pending_mappings
+                and addr not in self.ipv6_pending_mappings
             ]
 
             if len(new_addresses) > len(self.ipv6_unassigned_addresses):
@@ -502,20 +508,20 @@ class ProxyResolver(BaseResolver):
                 if existing_fake:
                     results[addr] = existing_fake
                     continue
-                existing_request = self.pending_mappings.get(addr)
+                existing_request = self.ipv6_pending_mappings.get(addr)
                 if existing_request:
                     requests[addr] = existing_request
                     continue
 
                 fake_addr = self.ipv6_unassigned_addresses.popleft()
                 request = IPv6MappingRequest(addr, fake_addr, threading.Event())
-                self.pending_mappings[addr] = request
-                self.mapping_batch.append(request)
+                self.ipv6_pending_mappings[addr] = request
+                self.ipv6_mapping_batch.append(request)
                 requests[addr] = request
 
             if requests:
-                if not self.mapping_batch_running:
-                    self.mapping_batch_running = True
+                if not self.ipv6_mapping_batch_running:
+                    self.ipv6_mapping_batch_running = True
                     is_batch_leader = True
                 self.mapping_condition.notify()
 
@@ -541,8 +547,8 @@ class ProxyResolver(BaseResolver):
                         break
                     self.mapping_condition.wait(remaining)
 
-                batch = self.mapping_batch
-                self.mapping_batch = []
+                batch = self.ipv6_mapping_batch
+                self.ipv6_mapping_batch = []
 
             rules = ['*nat']
             rules.extend(
@@ -573,7 +579,7 @@ class ProxyResolver(BaseResolver):
 
             with self.mapping_condition:
                 for request in batch:
-                    self.pending_mappings.pop(request.real_addr, None)
+                    self.ipv6_pending_mappings.pop(request.real_addr, None)
                     if success:
                         self.ipv6_mappings[request.real_addr] = request.fake_addr
                         self._write_ipv6_mapping_file()
@@ -581,11 +587,15 @@ class ProxyResolver(BaseResolver):
                             request.fake_addr, request.real_addr
                         ))
                     else:
-                        self.unassigned_addresses.appendleft(request.fake_addr)
+                        # Return the fake IPv4 address to the IPv6 egress pool,
+                        # not the IPv4 pool, so it remains available for future
+                        # IPv6 egress mappings and cannot be allocated to a
+                        # regular IPv4 mapping.
+                        self.ipv6_unassigned_addresses.appendleft(request.fake_addr)
                     request.event.set()
-                if not self.mapping_batch:
-                    self.pending_mappings.clear()
-                    self.mapping_batch_running = False
+                if not self.ipv6_mapping_batch:
+                    self.ipv6_pending_mappings.clear()
+                    self.ipv6_mapping_batch_running = False
                     self.mapping_condition.notify_all()
                     return
 
@@ -672,7 +682,7 @@ class ProxyResolver(BaseResolver):
         with self.mapping_condition:
             self.mapping_stopping = True
             self.mapping_condition.notify_all()
-            while self.mapping_batch_running:
+            while self.ipv4_mapping_batch_running or self.ipv6_mapping_batch_running:
                 self.mapping_condition.wait()
         while True:
             try:
@@ -836,10 +846,10 @@ class ProxyResolver(BaseResolver):
                 real_addr
                 for real_addr in unique_addresses
                 if not self.get_mapping(real_addr)
-                and real_addr not in self.pending_mappings
+                and real_addr not in self.ipv4_pending_mappings
             ]
             if len(new_addresses) > len(self.unassigned_addresses):
-                if self.pending_mappings:
+                if self.ipv4_pending_mappings:
                     return {real_addr: None for real_addr in unique_addresses}
                 if not self.reset_mappings():
                     return {real_addr: None for real_addr in unique_addresses}
@@ -850,19 +860,19 @@ class ProxyResolver(BaseResolver):
                 existing_fake_addr = self.get_mapping(real_addr)
                 if existing_fake_addr:
                     continue
-                existing_request = self.pending_mappings.get(real_addr)
+                existing_request = self.ipv4_pending_mappings.get(real_addr)
                 if existing_request:
                     requests[real_addr] = existing_request
                     continue
 
                 fake_addr = self.unassigned_addresses.popleft()
                 request = MappingRequest(real_addr, fake_addr, threading.Event())
-                self.pending_mappings[real_addr] = request
-                self.mapping_batch.append(request)
+                self.ipv4_pending_mappings[real_addr] = request
+                self.ipv4_mapping_batch.append(request)
                 requests[real_addr] = request
             if requests:
-                if not self.mapping_batch_running:
-                    self.mapping_batch_running = True
+                if not self.ipv4_mapping_batch_running:
+                    self.ipv4_mapping_batch_running = True
                     is_batch_leader = True
                 self.mapping_condition.notify()
 
@@ -887,8 +897,8 @@ class ProxyResolver(BaseResolver):
                         break
                     self.mapping_condition.wait(remaining)
 
-                batch = self.mapping_batch
-                self.mapping_batch = []
+                batch = self.ipv4_mapping_batch
+                self.ipv4_mapping_batch = []
 
             rules = ['*nat']
             rules.extend(
@@ -918,16 +928,16 @@ class ProxyResolver(BaseResolver):
 
             with self.mapping_condition:
                 for request in batch:
-                    self.pending_mappings.pop(request.real_addr, None)
+                    self.ipv4_pending_mappings.pop(request.real_addr, None)
                     if success:
                         self.ipmap[request.real_addr] = request.fake_addr
                         print('Mapping {} to {}'.format(request.fake_addr, request.real_addr))
                     else:
                         self.unassigned_addresses.appendleft(request.fake_addr)
                     request.event.set()
-                if not self.mapping_batch:
-                    self.pending_mappings.clear()
-                    self.mapping_batch_running = False
+                if not self.ipv4_mapping_batch:
+                    self.ipv4_pending_mappings.clear()
+                    self.ipv4_mapping_batch_running = False
                     self.mapping_condition.notify_all()
                     return
 
