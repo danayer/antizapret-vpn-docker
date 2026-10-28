@@ -7,7 +7,7 @@ import atexit, base64, http.client, os, queue, re, signal, socket, struct, subpr
 from urllib.parse import quote
 
 from collections import deque, namedtuple
-from ipaddress import IPv4Network, IPv6Network, IPv6Address
+from ipaddress import IPv4Address, IPv4Network, IPv6Address
 
 import maxminddb
 
@@ -141,6 +141,38 @@ class ProxyResolver(BaseResolver):
         if ipv6_egress_client_id:
             print('IPv6 egress AdGuard ClientID: {}'.format(ipv6_egress_client_id))
 
+        # Load existing IPv6 egress mappings from the mapping file. This
+        # restores fake IPv4 -> real IPv6 correspondences after a container
+        # restart, so that the translator and NAT rules remain consistent.
+        restored_ipv6 = self.load_ipv6_mappings()
+
+        # Create NAT rules for restored IPv6 mappings so that traffic to the
+        # virtual IPv4 addresses is redirected to the translator.
+        if restored_ipv6:
+            rules = ['*nat']
+            rules.extend(
+                '-A {} -p {} -d {} -j DNAT --to-destination 127.0.0.1:{}'.format(
+                    self.ipv6_tablename, protocol, fake_ipv4, self.ipv6_translator_port
+                )
+                for fake_ipv4, real_ipv6 in restored_ipv6
+                for protocol in ('tcp', 'udp')
+            )
+            rules.extend(('COMMIT', ''))
+            command = ['iptables-restore', '--wait', '--noflush']
+            try:
+                result = self.iptables_runner(
+                    command,
+                    input='\n'.join(rules),
+                    capture_output=True,
+                    text=True,
+                )
+                if result is not None and result.returncode != 0:
+                    print('ERROR: Failed to restore {} IPv6 mappings: {}'.format(
+                        len(restored_ipv6), result.stderr.strip()
+                    ))
+            except OSError as error:
+                print('ERROR: Failed to execute iptables-restore for IPv6 restore: {}'.format(error))
+
         # Load existing mappings
         if load_existing_mappings:
             get_mappings = "iptables -w -t nat -nL dnsmap | awk '{if (NR<3) {next}; sub(/to:/, \"\", $6); print $5,$6}'"
@@ -248,6 +280,103 @@ class ProxyResolver(BaseResolver):
             os.write(2, 'Failed to reload IPv6 egress domains: {}\n'.format(
                 error
             ).encode())
+
+    def load_ipv6_mappings(self):
+        """Load existing IPv6 egress mappings from the mapping file.
+
+        Reads the mapping file (fake_ipv4 real_ipv6 format), validates each
+        entry, and populates ipv6_mappings and ipv6_unassigned_addresses
+        accordingly. Returns a list of (fake_ipv4, real_ipv6) tuples for NAT
+        rule creation.
+
+        Duplicate fake IPv4 or real IPv6 addresses are skipped (first
+        occurrence wins). Entries with fake IPv4 outside the IPv6 egress pool
+        or invalid addresses are skipped with a diagnostic message.
+        """
+        if not self.ipv6_mapping_file:
+            return []
+
+        restored = []
+        seen_fake = set()
+        seen_real = set()
+
+        try:
+            with open(self.ipv6_mapping_file, 'r', encoding='utf-8') as f:
+                for line_num, raw_line in enumerate(f, 1):
+                    line = raw_line.strip()
+                    if not line or line.startswith('#'):
+                        continue
+
+                    parts = line.split()
+                    if len(parts) < 2:
+                        print('IPv6 egress: skipping malformed line {}: {}'.format(
+                            line_num, line
+                        ))
+                        continue
+
+                    fake_ipv4 = parts[0]
+                    real_ipv6 = parts[1]
+
+                    # Validate fake IPv4 address
+                    try:
+                        IPv4Address(fake_ipv4)
+                    except ValueError:
+                        print('IPv6 egress: skipping invalid fake IPv4 {} on line {}'.format(
+                            fake_ipv4, line_num
+                        ))
+                        continue
+
+                    # Validate real IPv6 address
+                    try:
+                        IPv6Address(real_ipv6)
+                    except ValueError:
+                        print('IPv6 egress: skipping invalid real IPv6 {} on line {}'.format(
+                            real_ipv6, line_num
+                        ))
+                        continue
+
+                    # Check fake IPv4 is in the IPv6 egress pool
+                    if fake_ipv4 not in self.ipv6_unassigned_addresses:
+                        print('IPv6 egress: skipping fake IPv4 {} not in egress pool on line {}'.format(
+                            fake_ipv4, line_num
+                        ))
+                        continue
+
+                    # Skip duplicates
+                    if fake_ipv4 in seen_fake:
+                        print('IPv6 egress: skipping duplicate fake IPv4 {} on line {}'.format(
+                            fake_ipv4, line_num
+                        ))
+                        continue
+                    if real_ipv6 in seen_real:
+                        print('IPv6 egress: skipping duplicate real IPv6 {} on line {}'.format(
+                            real_ipv6, line_num
+                        ))
+                        continue
+
+                    seen_fake.add(fake_ipv4)
+                    seen_real.add(real_ipv6)
+
+                    # Remove from unassigned pool so it cannot be re-allocated
+                    self.ipv6_unassigned_addresses.remove(fake_ipv4)
+
+                    # Store mapping
+                    self.ipv6_mappings[real_ipv6] = fake_ipv4
+                    restored.append((fake_ipv4, real_ipv6))
+
+            print('IPv6 egress: loaded {} mapping(s) from {}'.format(
+                len(restored), self.ipv6_mapping_file
+            ))
+            return restored
+
+        except FileNotFoundError:
+            print('IPv6 egress mapping file not found: {} (no mappings restored)'.format(
+                self.ipv6_mapping_file
+            ))
+            return []
+        except OSError as error:
+            print('IPv6 egress: failed to read mapping file: {}'.format(error))
+            return []
 
     def is_ipv6_egress_domain(self, domain):
         """Check if a domain (or any parent domain) is configured for IPv6 egress."""

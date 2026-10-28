@@ -1021,6 +1021,155 @@ class IPv6EgressMappingTests(ResolverTestCase):
         self.assertEqual(len(resolver.ipv6_mappings), 0)
 
 
+class IPv6EgressMappingRestoreTests(ResolverTestCase):
+    """Tests for IPv6 mapping restoration from file after restart."""
+
+    def make_resolver_with_ipv6(self, **overrides):
+        arguments = {
+            'address': 'adguard',
+            'port': 53,
+            'doh_port': 3000,
+            'timeout': 1,
+            'iprange': '14.16.0.0/29',
+            'client_id': 'az-local',
+            'resolver_client_id': 'az-resolver',
+            'asn_file': str(self.asn_file),
+            'asn_database': '/unused.mmdb',
+            'asn_database_reader': self.asn_database,
+            'iptables_runner': self.iptables_runner,
+            'load_existing_mappings': False,
+            'mapping_batch_delay': 0.001,
+            'ipv6_egress_file': str(self.temp_directory.name + '/ipv6-egress.txt'),
+            'ipv6_translator_port': 9000,
+            'ipv6_egress_enabled': True,
+            'ipv6_egress_mode': 'file_only',
+        }
+        arguments.update(overrides)
+        resolver = dnsmap.ProxyResolver(**arguments)
+        self.addCleanup(resolver.close)
+        return resolver
+
+    def test_ipv6_mappings_restored_from_file(self):
+        """Existing IPv6 mappings are loaded from the mapping file on startup."""
+        mapping_file = Path(self.temp_directory.name) / 'ipv6-egress-mappings.txt'
+        mapping_file.write_text(
+            '14.16.0.2 2001:db8::1\n14.16.0.3 2001:db8::2\n',
+            encoding='utf-8'
+        )
+
+        resolver = self.make_resolver_with_ipv6(
+            ipv6_mapping_file=str(mapping_file)
+        )
+
+        # Both mappings should be restored
+        self.assertEqual(resolver.get_ipv6_mapping_by_real('2001:db8::1'), '14.16.0.2')
+        self.assertEqual(resolver.get_ipv6_mapping_by_real('2001:db8::2'), '14.16.0.3')
+        self.assertEqual(len(resolver.ipv6_mappings), 2)
+
+        # The restored fake IPs should be removed from the unassigned pool
+        self.assertNotIn('14.16.0.2', resolver.ipv6_unassigned_addresses)
+        self.assertNotIn('14.16.0.3', resolver.ipv6_unassigned_addresses)
+
+        # NAT rules should have been created for both mappings
+        input_rules = self.iptables_runner.call_args.kwargs['input']
+        self.assertIn(
+            '-A dnsmap-ipv6 -p tcp -d 14.16.0.2 -j DNAT --to-destination 127.0.0.1:9000',
+            input_rules,
+        )
+        self.assertIn(
+            '-A dnsmap-ipv6 -p udp -d 14.16.0.2 -j DNAT --to-destination 127.0.0.1:9000',
+            input_rules,
+        )
+        self.assertIn(
+            '-A dnsmap-ipv6 -p tcp -d 14.16.0.3 -j DNAT --to-destination 127.0.0.1:9000',
+            input_rules,
+        )
+        self.assertIn(
+            '-A dnsmap-ipv6 -p udp -d 14.16.0.3 -j DNAT --to-destination 127.0.0.1:9000',
+            input_rules,
+        )
+
+    def test_ipv6_mappings_restored_skips_malformed_lines(self):
+        """Malformed lines in the mapping file are skipped."""
+        mapping_file = Path(self.temp_directory.name) / 'ipv6-egress-mappings.txt'
+        mapping_file.write_text(
+            '14.16.0.2 2001:db8::1\n'
+            'not-an-ip 2001:db8::2\n'
+            '14.16.0.3 not-an-ip\n'
+            '14.16.0.4\n'
+            '\n'
+            '# comment\n',
+            encoding='utf-8'
+        )
+
+        resolver = self.make_resolver_with_ipv6(
+            ipv6_mapping_file=str(mapping_file)
+        )
+
+        # Only the valid mapping should be restored
+        self.assertEqual(resolver.get_ipv6_mapping_by_real('2001:db8::1'), '14.16.0.2')
+        self.assertIsNone(resolver.get_ipv6_mapping_by_real('2001:db8::2'))
+        self.assertEqual(len(resolver.ipv6_mappings), 1)
+
+    def test_ipv6_mappings_restored_skips_duplicates(self):
+        """Duplicate fake IPv4 or real IPv6 entries are skipped."""
+        mapping_file = Path(self.temp_directory.name) / 'ipv6-egress-mappings.txt'
+        mapping_file.write_text(
+            '14.16.0.2 2001:db8::1\n'
+            '14.16.0.2 2001:db8::2\n'  # duplicate fake IPv4
+            '14.16.0.3 2001:db8::1\n'  # duplicate real IPv6
+            '14.16.0.4 2001:db8::3\n',
+            encoding='utf-8'
+        )
+
+        resolver = self.make_resolver_with_ipv6(
+            ipv6_mapping_file=str(mapping_file)
+        )
+
+        # First occurrence wins for both fake and real
+        self.assertEqual(resolver.get_ipv6_mapping_by_real('2001:db8::1'), '14.16.0.2')
+        self.assertEqual(resolver.get_ipv6_mapping_by_real('2001:db8::3'), '14.16.0.4')
+        self.assertIsNone(resolver.get_ipv6_mapping_by_real('2001:db8::2'))
+        self.assertEqual(len(resolver.ipv6_mappings), 2)
+
+    def test_ipv6_mappings_restored_skips_outside_pool(self):
+        """Fake IPv4 addresses outside the IPv6 egress pool are skipped."""
+        mapping_file = Path(self.temp_directory.name) / 'ipv6-egress-mappings.txt'
+        mapping_file.write_text(
+            '14.16.0.2 2001:db8::1\n'
+            '10.0.0.1 2001:db8::2\n'  # outside the pool
+            '14.16.0.3 2001:db8::3\n',
+            encoding='utf-8'
+        )
+
+        resolver = self.make_resolver_with_ipv6(
+            ipv6_mapping_file=str(mapping_file)
+        )
+
+        self.assertEqual(resolver.get_ipv6_mapping_by_real('2001:db8::1'), '14.16.0.2')
+        self.assertEqual(resolver.get_ipv6_mapping_by_real('2001:db8::3'), '14.16.0.3')
+        self.assertIsNone(resolver.get_ipv6_mapping_by_real('2001:db8::2'))
+        self.assertEqual(len(resolver.ipv6_mappings), 2)
+
+    def test_ipv6_mappings_restored_prevents_reallocation(self):
+        """Restored fake IPv4 addresses are not re-allocated to new mappings."""
+        mapping_file = Path(self.temp_directory.name) / 'ipv6-egress-mappings.txt'
+        mapping_file.write_text(
+            '14.16.0.2 2001:db8::1\n',
+            encoding='utf-8'
+        )
+
+        resolver = self.make_resolver_with_ipv6(
+            ipv6_mapping_file=str(mapping_file)
+        )
+
+        # The restored address should not be re-allocated
+        result = resolver.add_ipv6_mapping('2001:db8::2')
+        self.assertNotEqual(result, '14.16.0.2')
+        self.assertEqual(resolver.get_ipv6_mapping_by_real('2001:db8::1'), '14.16.0.2')
+        self.assertEqual(resolver.get_ipv6_mapping_by_real('2001:db8::2'), result)
+
+
 class IPv6EgressResolverTests(ResolverTestCase):
     """Tests for DNS resolution with IPv6 egress domains."""
 
