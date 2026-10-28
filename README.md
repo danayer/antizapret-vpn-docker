@@ -325,9 +325,38 @@ Add specific domain rules with `important` to override the catch-all:
   and route. Without IPv6, IPv6 egress domains on that node will fail with `SERVFAIL` — existing
   VPN functionality is unaffected.
 - **`NET_ADMIN` capability**: Already present in the `antizapret` container for iptables DNAT rules.
+- **Docker IPv6 network (created automatically)**: `docker-compose.yml` defines a Compose-managed
+  bridge network (`ipv6`, created as `<project>_ipv6`) with `enable_ipv6: true` and attaches
+  `az-local` to it. `docker compose up` creates the network automatically — there is no
+  `external: true` dependency and no manual `docker network create` is required. Docker allocates
+  a unique ULA IPv6 subnet per installation, so independent installations do not collide.
+  Only `az-local` is attached; other services keep using the default application network.
 - **No additional packages**: The translator is a pure Python3 script using only the standard library.
 - **Separate state per node**: `az-local` and `az-world` use independent mapping files, NAT rules,
   and translator instances. State is never shared between nodes.
+
+### Docker IPv6 network and external connectivity
+
+The Compose-managed IPv6 network gives `az-local` an IPv6 address on a dedicated bridge interface.
+This alone does **not** guarantee that the container can reach the external IPv6 Internet. External
+IPv6 egress additionally requires on the host:
+
+- a global IPv6 address on the upstream interface,
+- an IPv6 default route,
+- IPv6 forwarding enabled (`net.ipv6.conf.all.forwarding=1`),
+- a firewall backend that lets Docker add the necessary IPv6 rules,
+- no host-level policy blocking outbound IPv6.
+
+If any of these is missing, the container may have an IPv6 address on the Docker network but still
+cannot reach external IPv6 destinations. Use `scripts/diagnose-ipv6-egress.sh` to distinguish
+between "no Docker IPv6 network", "no route inside the container", and "external IPv6 blocked on
+the host". The script is read-only by default; use `--check-external` for an explicit outbound
+IPv6 test.
+
+The translator listens on `127.0.0.1:9000` inside `az-local`. Traffic from VPN clients is DNAT'ed
+to this loopback address; if it does not reach the translator, enable
+`net.ipv4.conf.all.route_localnet=1` for the `az-local` container (per-container sysctl, does not
+affect the host or other containers).
 
 ## Limitations
 
@@ -399,6 +428,26 @@ ping6 -c 3 2001:4860:4860::8888
 curl -6 -I https://example.com
 ```
 
+Run the read-only diagnostic script (no external host is contacted):
+
+```bash
+./scripts/diagnose-ipv6-egress.sh
+```
+
+It reports Docker/Compose versions, the IPv6 network state (`EnableIPv6`, driver, subnet),
+`az-local` network attachments, the IPv6 address and route inside the container, host forwarding
+and firewall signs, environment variables, translator process status, and the domains/mappings
+files. Use `./scripts/diagnose-ipv6-egress.sh --check-external` for an explicit outbound IPv6
+connectivity test (contacts an external IPv6 address).
+
+The diagnostic distinguishes three situations:
+1. Docker IPv6 network missing or without `EnableIPv6=true` → run `docker compose up -d` so
+   Compose creates the network.
+2. IPv6 enabled but `az-local` has no IPv6 address/route on the new interface → check the
+   container network attachment and Docker daemon IPv6 support.
+3. Route present but external IPv6 unreachable → check host IPv6 default route, forwarding
+   (`net.ipv6.conf.all.forwarding`), and firewall (`ip6tables`).
+
 Check AdGuard Home rules for IPv6 egress:
 
 ```bash
@@ -462,11 +511,14 @@ Recommended to use server located in western countries. Some sites will block us
 The default Compose configuration runs one `az-local` exit container. It handles
 both the local and world domain lists using the `14.16.0.0/15` range.
 
-0. Install [Docker Engine](https://docs.docker.com/engine/install/):
+0. Install [Docker Engine](https://docs.docker.com/engine/install/) and [Docker Compose](https://docs.docker.com/compose/install/):
    ```bash
    curl -fsSL https://get.docker.com -o get-docker.sh
    sudo sh get-docker.sh
    ```
+   Minimum versions: Docker Engine 20.10+ and Compose v2 (Compose CLI v1.28.0+). The IPv6
+   bridge network with `enable_ipv6: true` is created automatically by Compose on
+   `docker compose up`; no manual `docker network create` is required.
 1. Clone repository and start container:
    ```bash
    git clone https://github.com/xtrime-ru/antizapret-vpn-docker.git antizapret
@@ -493,6 +545,9 @@ Find full example in [docker-compose.override.sample.yml](./docker-compose.overr
    docker compose up -d
    docker system prune -f
 ```
+`docker compose up -d` automatically creates the IPv6 bridge network (`enable_ipv6: true`) and
+attaches `az-local` to it, so no manual `docker network create` is required. If Docker IPv6 is
+not supported by the daemon, Compose reports a clear error instead of silently skipping IPv6.
 
 ## Docker Swarm, multiple exit nodes (Advanced)
 Version 5 and 6 comes with ability to forward traffic to different exit nodes for different domains. 
@@ -787,6 +842,9 @@ Some containers have same ports. So you need to choose unique external port in d
    docker compose up -d --remove-orphans
    docker system prune -af
    ```
+   The Compose-managed IPv6 network is recreated automatically by `docker compose up -d`.
+   If it was removed manually (e.g. `docker network prune`), the next `docker compose up -d`
+   recreates it. No manual `docker network create` is needed.
 - Swarm mode: 
    ```shell
    git pull --rebase

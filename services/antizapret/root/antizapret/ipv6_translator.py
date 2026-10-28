@@ -46,7 +46,11 @@ LISTEN_PORT = int(os.getenv('IPV6_TRANSLATOR_PORT', '9000'))
 RELOAD_INTERVAL = 5  # seconds between mapping file reloads
 CONNECT_TIMEOUT = 10  # seconds for IPv6 connect
 RELAY_BUFFER_SIZE = 65536
-UDP_UPSTREAM_IDLE_TIMEOUT = 300  # seconds before closing idle upstream UDP sockets
+UDP_UPSTREAM_IDLE_TIMEOUT = 300  # seconds before closing idle upstream sockets
+
+# Optional diagnostic mode. When enabled, only technical connection events are
+# logged. Payloads, SNI and any user data are never inspected or logged.
+DEBUG = os.getenv('IPV6_TRANSLATOR_DEBUG', '').lower() in ('1', 'true', 'yes', 'on')
 
 # ---------------------------------------------------------------------------
 # Mapping table
@@ -112,74 +116,6 @@ class MappingTable:
 # TCP relay
 # ---------------------------------------------------------------------------
 
-def _tls_client_hello_sni(data):
-    """Extract SNI from a complete TLS ClientHello record, if present."""
-    try:
-        if len(data) < 9 or data[0] != 22:
-            return None
-        record_len = int.from_bytes(data[3:5], 'big')
-        if len(data) < 5 + record_len:
-            return None
-
-        handshake = data[5:5 + record_len]
-        if len(handshake) < 4 or handshake[0] != 1:
-            return None
-        hs_len = int.from_bytes(handshake[1:4], 'big')
-        if len(handshake) < 4 + hs_len:
-            return None
-
-        body = handshake[4:4 + hs_len]
-        pos = 34  # ClientHello version + random
-        if pos >= len(body):
-            return None
-
-        session_len = body[pos]
-        pos += 1 + session_len
-        if pos + 2 > len(body):
-            return None
-
-        cipher_len = int.from_bytes(body[pos:pos + 2], 'big')
-        pos += 2 + cipher_len
-        if pos >= len(body):
-            return None
-
-        compression_len = body[pos]
-        pos += 1 + compression_len
-        if pos + 2 > len(body):
-            return None
-
-        extensions_len = int.from_bytes(body[pos:pos + 2], 'big')
-        pos += 2
-        ext_end = min(pos + extensions_len, len(body))
-
-        while pos + 4 <= ext_end:
-            ext_type = int.from_bytes(body[pos:pos + 2], 'big')
-            ext_len = int.from_bytes(body[pos + 2:pos + 4], 'big')
-            pos += 4
-            ext = body[pos:pos + ext_len]
-            if len(ext) != ext_len:
-                return None
-            pos += ext_len
-
-            if ext_type != 0 or len(ext) < 2:
-                continue
-
-            i = 2
-            while i + 3 <= len(ext):
-                name_type = ext[i]
-                name_len = int.from_bytes(ext[i + 1:i + 3], 'big')
-                name = ext[i + 3:i + 3 + name_len]
-                if len(name) != name_len:
-                    return None
-                if name_type == 0:
-                    return name.decode('ascii', errors='replace')
-                i += 3 + name_len
-
-        return None
-    except (IndexError, ValueError, struct.error):
-        return None
-
-
 def parse_original_destination(data):
     """Parse IPv4 sockaddr returned by SO_ORIGINAL_DST."""
     if len(data) < 8:
@@ -194,84 +130,27 @@ def parse_original_destination(data):
 
 
 def relay_tcp(src_sock, dst_sock):
-    """Relay TCP bidirectionally and diagnose the upstream TLS response."""
-    debug_host = os.getenv(
-        'IPV6_TRANSLATOR_DEBUG_HOST', 'example.com'
-    ).strip().lower().rstrip('.')
+    """Relay TCP bidirectionally and transparently.
 
-    state = {
-        'client_buffer': bytearray(),
-        'server_buffer': bytearray(),
-        'sni_checked': False,
-        'enabled': False,
-        'reported': set(),
-        'first_bytes_reported': False,
-    }
-    state_lock = threading.Lock()
-
-    def report_upstream():
-        if not state['enabled'] or not state['server_buffer']:
-            return
-
-        if not state['first_bytes_reported']:
-            state['first_bytes_reported'] = True
-            print(
-                'translator: TLS diagnostic upstream first bytes (hex)={}'.format(
-                    bytes(state['server_buffer'][:64]).hex()
-                ),
-                flush=True
-            )
-
-        for marker in (
-            b'example.com',
-            b'accounts.meta.com',
-            b'facebook.com',
-        ):
-            if marker in state['server_buffer'] and marker not in state['reported']:
-                state['reported'].add(marker)
-                print(
-                    'translator: TLS diagnostic upstream bytes contain {!r}'.format(
-                        marker.decode('ascii')
-                    ),
-                    flush=True
-                )
-
-    def _forward(src, dst, direction):
+    No payload inspection, buffering or modification happens on the normal
+    path. Half-close is honoured: when one direction reaches EOF, the write
+    side of the other socket is shut down so the peer can finish sending its
+    remaining data. When either direction ends, both sockets are closed so
+    the other relay thread does not hang indefinitely.
+    """
+    def _forward(src, dst):
         try:
             while True:
                 data = src.recv(RELAY_BUFFER_SIZE)
                 if not data:
-                    break
-
-                with state_lock:
-                    if direction == 'client->server' and not state['sni_checked']:
-                        remaining = 65536 - len(state['client_buffer'])
-                        if remaining > 0:
-                            state['client_buffer'].extend(data[:remaining])
-
-                        sni = _tls_client_hello_sni(state['client_buffer'])
-                        if sni is not None:
-                            state['sni_checked'] = True
-                            state['enabled'] = (
-                                sni.lower().rstrip('.') == debug_host
-                            )
-                            if state['enabled']:
-                                print(
-                                    'translator: TLS diagnostic client SNI={!r}'.format(sni),
-                                    flush=True
-                                )
-                                report_upstream()
-
-                    elif direction == 'server->client':
-                        # Buffer server data even before the client SNI is parsed.
-                        remaining = 65536 - len(state['server_buffer'])
-                        if remaining > 0:
-                            state['server_buffer'].extend(data[:remaining])
-                        report_upstream()
-
-                # Forward the original bytes unchanged.
+                    # Peer shut down its write side. Tell dst we will not send
+                    # more data, but keep receiving until dst closes too.
+                    try:
+                        dst.shutdown(socket.SHUT_WR)
+                    except OSError:
+                        pass
+                    return
                 dst.sendall(data)
-
         except (OSError, ConnectionError):
             pass
         finally:
@@ -284,16 +163,13 @@ def relay_tcp(src_sock, dst_sock):
             except OSError:
                 pass
 
-    t1 = threading.Thread(
-        target=_forward, args=(src_sock, dst_sock, 'client->server'), daemon=True
-    )
-    t2 = threading.Thread(
-        target=_forward, args=(dst_sock, src_sock, 'server->client'), daemon=True
-    )
+    t1 = threading.Thread(target=_forward, args=(src_sock, dst_sock), daemon=True)
+    t2 = threading.Thread(target=_forward, args=(dst_sock, src_sock), daemon=True)
     t1.start()
     t2.start()
     t1.join()
     t2.join()
+
 
 def handle_tcp_connection(conn, addr, mapping_table):
     """Handle a single TCP connection from the iptables DNAT redirect."""
@@ -581,45 +457,61 @@ def run_udp_server(listen_addr, listen_port, mapping_table, upstream_pool):
 
     Uses IP_RECVORIGDSTADDR ancillary data via recvmsg() to recover the original
     destination address before DNAT redirected the packet to this translator.
-    This is more reliable than getsockopt(SO_ORIGINAL_DST) on a UDP socket.
+    If the socket option is unavailable (e.g. restricted kernel), falls back to
+    getsockopt(SO_ORIGINAL_DST) per packet, which is less reliable.
     """
     listen_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     listen_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 
     # Enable receiving original destination address as ancillary data
+    recv_orig_dst_available = True
     try:
         listen_sock.setsockopt(SOL_IP, IP_RECVORIGDSTADDR, 1)
     except OSError as error:
-        print('translator: failed to set IP_RECVORIGDSTADDR: {} (UDP original dst may be unreliable)'.format(
-            error
-        ))
+        recv_orig_dst_available = False
+        print('translator: IP_RECVORIGDSTADDR unavailable: {} (UDP original destination '
+              'may be unreliable; falling back to SO_ORIGINAL_DST)'.format(error))
 
     listen_sock.bind((listen_addr, listen_port))
     print('translator: listening on {}:{} (UDP)'.format(listen_addr, listen_port))
 
+    _getsockopt_warned = False
+
     while True:
         try:
-            # recvmsg() returns: (data, ancdata, flags, address)
-            data, ancdata, flags, src_addr = listen_sock.recvmsg(
-                RELAY_BUFFER_SIZE,
-                socket.CMSG_SPACE(16)  # Space for sockaddr_in ancillary data
-            )
+            data = None
+            src_addr = None
+            orig_dst_ip = orig_dst_port = None
+            if recv_orig_dst_available:
+                # recvmsg() returns: (data, ancdata, flags, address)
+                data, ancdata, flags, src_addr = listen_sock.recvmsg(
+                    RELAY_BUFFER_SIZE,
+                    socket.CMSG_SPACE(16)  # Space for sockaddr_in ancillary data
+                )
 
-            # Extract original destination from ancillary data
-            orig_dst_ip, orig_dst_port = extract_original_dst_from_cmsg(
-                (data, ancdata, flags, src_addr)
-            )
-
-            if orig_dst_ip is None or orig_dst_port is None:
-                # Fallback: try getsockopt (may not work reliably on all kernels)
+                # Extract original destination from ancillary data
+                orig_dst_ip, orig_dst_port = extract_original_dst_from_cmsg(
+                    (data, ancdata, flags, src_addr)
+                )
+            else:
+                # Fallback for kernels/containers without IP_RECVORIGDSTADDR:
+                # block on recvfrom, then best-effort SO_ORIGINAL_DST.
+                data, src_addr = listen_sock.recvfrom(RELAY_BUFFER_SIZE)
                 try:
                     orig_dst = listen_sock.getsockopt(socket.SOL_IP, SO_ORIGINAL_DST, 16)
-                    _port, _zero1, _zero2, ip = struct.unpack('!HHxxII', orig_dst)
-                    orig_dst_ip = socket.inet_ntoa(struct.pack('!I', ip))
-                    orig_dst_port = _port
-                except (OSError, struct.error) as error:
-                    print('translator: failed to get original destination for UDP: {}'.format(error))
-                    continue
+                    orig_dst_ip, orig_dst_port = parse_original_destination(orig_dst)
+                except (OSError, struct.error):
+                    orig_dst_ip = orig_dst_port = None
+
+            if orig_dst_ip is None or orig_dst_port is None:
+                # Original destination could not be determined reliably.
+                # Report once, then drop the packet rather than silently
+                # forwarding it to the wrong peer.
+                if not recv_orig_dst_available and not _getsockopt_warned:
+                    _getsockopt_warned = True
+                    print('translator: failed to get original destination for UDP '
+                          '(SO_ORIGINAL_DST unavailable; UDP packets dropped)')
+                continue
 
             t = threading.Thread(
                 target=handle_udp_packet,
@@ -643,6 +535,8 @@ def main():
     print('translator: starting IPv4→IPv6 translator')
     print('translator: listen address: {}:{}'.format(LISTEN_ADDR, listen_port))
     print('translator: mapping file: {}'.format(mapping_file))
+    if DEBUG:
+        print('translator: diagnostic mode enabled')
 
     mapping_table = MappingTable(mapping_file)
     watcher = mapping_table.start_watcher()

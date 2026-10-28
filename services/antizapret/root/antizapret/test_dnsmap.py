@@ -4,13 +4,17 @@
 import queue
 import ipaddress
 import socket
+import struct
 import tempfile
 import threading
+import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest.mock import Mock, patch
+
+import yaml
 
 from dnslib import A, AAAA, CNAME, DNSRecord, QTYPE, RCODE, RR
 
@@ -1836,6 +1840,206 @@ class OriginalDestinationParsingTests(unittest.TestCase):
             ('203.0.113.7', 443),
         )
 
+
+class TransparentTCPRelayTests(unittest.TestCase):
+    """Tests for the transparent TCP relay (relay_tcp)."""
+
+    def test_relay_transfers_data_both_ways_without_modification(self):
+        client, server = socket.socketpair()
+        client.settimeout(5)
+        server.settimeout(5)
+        self.addCleanup(client.close)
+        self.addCleanup(server.close)
+
+        t = threading.Thread(target=ipv6_translator.relay_tcp,
+                             args=(client, server), daemon=True)
+        t.start()
+
+        # Client -> server must arrive byte-for-byte.
+        client.sendall(b'ping')
+        self.assertEqual(server.recv(65536), b'ping')
+
+        # Server -> client must arrive byte-for-byte. All receives happen
+        # before any half-close because the relay closes each socket when its
+        # direction ends.
+        server.sendall(b'pong')
+        self.assertEqual(client.recv(65536), b'pong')
+        server.sendall(b'bye')
+        self.assertEqual(client.recv(65536), b'bye')
+
+        # Half-close: client finishes writing. The relay shuts down the other
+        # direction and closes both sockets; join must return.
+        client.shutdown(socket.SHUT_WR)
+        t.join(timeout=5)
+        self.assertFalse(t.is_alive(), 'relay thread did not terminate after half-close')
+
+    def test_relay_terminates_when_one_side_finishes_writing(self):
+        client, server = socket.socketpair()
+        client.settimeout(5)
+        server.settimeout(5)
+        self.addCleanup(client.close)
+        self.addCleanup(server.close)
+
+        t = threading.Thread(target=ipv6_translator.relay_tcp,
+                             args=(client, server), daemon=True)
+        t.start()
+        # One side finishes writing; the relay must shut down the other
+        # direction and terminate instead of hanging forever.
+        client.shutdown(socket.SHUT_WR)
+        t.join(timeout=5)
+        self.assertFalse(t.is_alive(), 'relay thread did not terminate after one side finished writing')
+
+
+class UDPOriginalDestinationTests(unittest.TestCase):
+    """Tests for parsing the UDP original destination address."""
+
+    def _sockaddr_in(self, family, port, addr_bytes):
+        return struct.pack('!HH4s8x', family, port, addr_bytes)
+
+    def test_extract_original_dst_from_cmsg_valid(self):
+        sockaddr = self._sockaddr_in(socket.AF_INET, 443,
+                                     socket.inet_aton('203.0.113.7'))
+        msg = (b'data', [(ipv6_translator.SOL_IP,
+                          ipv6_translator.IP_RECVORIGDSTADDR, sockaddr)], 0, None)
+        self.assertEqual(
+            ipv6_translator.extract_original_dst_from_cmsg(msg),
+            ('203.0.113.7', 443))
+
+    def test_extract_original_dst_wrong_family_is_ignored(self):
+        sockaddr = self._sockaddr_in(socket.AF_INET6, 443, b'\x00' * 4)
+        msg = (b'data', [(ipv6_translator.SOL_IP,
+                          ipv6_translator.IP_RECVORIGDSTADDR, sockaddr)], 0, None)
+        self.assertEqual(
+            ipv6_translator.extract_original_dst_from_cmsg(msg), (None, None))
+
+    def test_extract_original_dst_too_short_is_ignored(self):
+        msg = (b'data', [(ipv6_translator.SOL_IP,
+                          ipv6_translator.IP_RECVORIGDSTADDR, b'\x00')], 0, None)
+        self.assertEqual(
+            ipv6_translator.extract_original_dst_from_cmsg(msg), (None, None))
+
+    def test_extract_original_dst_wrong_level_is_ignored(self):
+        sockaddr = self._sockaddr_in(socket.AF_INET, 443,
+                                     socket.inet_aton('203.0.113.7'))
+        msg = (b'data', [(socket.SOL_UDP, 99, sockaddr)], 0, None)
+        self.assertEqual(
+            ipv6_translator.extract_original_dst_from_cmsg(msg), (None, None))
+
+    def test_parse_original_destination_valid(self):
+        sockaddr = self._sockaddr_in(socket.AF_INET, 443,
+                                     socket.inet_aton('203.0.113.7'))
+        self.assertEqual(
+            ipv6_translator.parse_original_destination(sockaddr),
+            ('203.0.113.7', 443))
+
+    def test_parse_original_destination_too_short(self):
+        with self.assertRaises(struct.error):
+            ipv6_translator.parse_original_destination(b'\x02\x00\x01\xbb')
+
+
+class UDPServerSetupTests(unittest.TestCase):
+    """Tests for UDP server behaviour when IP_RECVORIGDSTADDR is unavailable."""
+
+    def setUp(self):
+        self.repo_root = Path(__file__).resolve().parents[4]
+
+    def test_run_udp_server_setsockopt_failure_logs_and_stops_cleanly(self):
+        orig_socket = socket.socket
+        instances = []
+
+        class FailingSocket:
+            def __init__(self, *args, **kwargs):
+                self._s = orig_socket(*args, **kwargs)
+                instances.append(self)
+                self.recvmsg_calls = 0
+
+            def setsockopt(self, level, optname, value):
+                if level == ipv6_translator.SOL_IP and                         optname == ipv6_translator.IP_RECVORIGDSTADDR:
+                    raise OSError(92, 'Protocol not available')
+                return self._s.setsockopt(level, optname, value)
+
+            def bind(self, addr):
+                return self._s.bind(addr)
+
+            def recvfrom(*args, **kwargs):
+                # Fallback path uses blocking recvfrom; raise so the server
+                # loop exits cleanly instead of spinning forever.
+                raise OSError(9, 'Bad file descriptor')
+
+            def __getattr__(self, name):
+                return getattr(self._s, name)
+
+        with patch.object(ipv6_translator.socket, 'socket', FailingSocket),                 patch('builtins.print') as mock_print:
+            probe = orig_socket(socket.AF_INET, socket.SOCK_DGRAM)
+            probe.bind(('127.0.0.1', 0))
+            port = probe.getsockname()[1]
+            probe.close()
+
+            def run():
+                try:
+                    ipv6_translator.run_udp_server(
+                        '127.0.0.1', port,
+                        ipv6_translator.MappingTable(
+                            str(self.repo_root / 'config' / 'antizapret' /
+                                'ipv6-egress-domains-local.txt')),
+                        ipv6_translator.UpstreamUDPSocketPool())
+                except OSError:
+                    pass
+
+            t = threading.Thread(target=run, daemon=True)
+            t.start()
+            t.join(timeout=5)
+
+            self.assertFalse(t.is_alive(), 'UDP server did not stop after receive error')
+            printed = ' '.join(str(args[0]) for args in mock_print.call_args_list)
+            self.assertIn('IP_RECVORIGDSTADDR unavailable', printed)
+
+class ComposeNetworkTests(unittest.TestCase):
+    """Tests validating the Compose-managed IPv6 network configuration."""
+
+    def setUp(self):
+        self.repo_root = Path(__file__).resolve().parents[4]
+        with open(self.repo_root / 'docker-compose.yml') as f:
+            self.compose = yaml.safe_load(f)
+        with open(self.repo_root / 'services' / 'antizapret' / 'docker-compose.yml') as f:
+            self.antizapret_compose = yaml.safe_load(f)
+        self.az_local_volumes = (
+            self.compose['services']['az-local'].get('volumes') or []
+            + self.antizapret_compose['services']['antizapret'].get('volumes') or []
+        )
+
+    def test_ipv6_network_is_created_by_compose_not_external(self):
+        net = self.compose['networks']['ipv6']
+        self.assertEqual(net['driver'], 'bridge')
+        self.assertTrue(net['enable_ipv6'])
+        self.assertNotEqual(net.get('external'), True)
+
+    def test_az_local_keeps_default_network_and_adds_ipv6(self):
+        nets = self.compose['services']['az-local']['networks']
+        self.assertIn('default', nets)
+        self.assertIn('ipv6', nets)
+
+    def test_translator_port_is_not_published(self):
+        ports = self.compose['services']['az-local'].get('ports') or []
+        for port in ports:
+            if isinstance(port, str):
+                self.assertNotIn(':9000', port)
+            elif isinstance(port, dict):
+                self.assertNotEqual(port.get('published'), 9000)
+
+    def test_domains_file_bind_mount_path(self):
+        mounts = [v for v in self.az_local_volumes if 'ipv6-egress-domains-local.txt' in v]
+        self.assertTrue(any(
+            'config/antizapret/ipv6-egress-domains-local.txt' in v and
+            '/root/antizapret/config/ipv6-egress-domains-local.txt' in v
+            for v in mounts
+        ), 'expected bind mount config/antizapret/ipv6-egress-domains-local.txt -> /root/antizapret/config/ipv6-egress-domains-local.txt')
+
+    def test_mappings_file_reachable_via_result_volume(self):
+        self.assertTrue(any(
+            'config/antizapret/result' in v and '/root/antizapret/result' in v
+            for v in self.az_local_volumes
+        ), 'expected result volume config/antizapret/result -> /root/antizapret/result (holds ipv6-egress-mappings-local.txt)')
 
 
 if __name__ == '__main__':

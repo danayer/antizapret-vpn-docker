@@ -97,16 +97,26 @@ trap cleanup_doall_owner EXIT HUP INT QUIT PIPE TERM
 
 # Prepare iptables for dnsmap.py
 CHAIN=dnsmap
-iptables -t nat -N "$CHAIN"
-iptables -t nat -A PREROUTING -d "${AZ_SUBNET}" -j "$CHAIN"
-iptables -t nat -A OUTPUT -d "${AZ_SUBNET}" -j "$CHAIN"
+iptables -t nat -N "$CHAIN" 2>/dev/null || true
+# Anchor rules are idempotent: repeated container restarts must not duplicate them.
+iptables -t nat -C PREROUTING -d "${AZ_SUBNET}" -j "$CHAIN" 2>/dev/null || \
+    iptables -t nat -A PREROUTING -d "${AZ_SUBNET}" -j "$CHAIN"
+iptables -t nat -C OUTPUT -d "${AZ_SUBNET}" -j "$CHAIN" 2>/dev/null || \
+    iptables -t nat -A OUTPUT -d "${AZ_SUBNET}" -j "$CHAIN"
 # Prepare iptables for IPv6 egress mappings (separate chain to avoid flush conflicts)
 IPV6_CHAIN=dnsmap-ipv6
 iptables -t nat -N "$IPV6_CHAIN" 2>/dev/null || true
-iptables -t nat -A PREROUTING -d "${AZ_SUBNET}" -j "$IPV6_CHAIN" 2>/dev/null || true
-iptables -t nat -A OUTPUT -d "${AZ_SUBNET}" -j "$IPV6_CHAIN" 2>/dev/null || true
+# Flush mapping rules accumulated by previous runs before restoring the saved
+# set. dnsmap reloads mappings from iptables immediately after start, so
+# existing mappings are preserved and duplicates cannot accumulate.
+iptables -t nat -F "$IPV6_CHAIN" 2>/dev/null || true
+iptables -t nat -C PREROUTING -d "${AZ_SUBNET}" -j "$IPV6_CHAIN" 2>/dev/null || \
+    iptables -t nat -A PREROUTING -d "${AZ_SUBNET}" -j "$IPV6_CHAIN"
+iptables -t nat -C OUTPUT -d "${AZ_SUBNET}" -j "$IPV6_CHAIN" 2>/dev/null || \
+    iptables -t nat -A OUTPUT -d "${AZ_SUBNET}" -j "$IPV6_CHAIN"
 for eth in $(ip link | grep -oE "eth[0-9]"); do
-    iptables -t nat -A POSTROUTING -o "$eth" -j MASQUERADE
+    iptables -t nat -C POSTROUTING -o "$eth" -j MASQUERADE 2>/dev/null || \
+        iptables -t nat -A POSTROUTING -o "$eth" -j MASQUERADE
 done
 
 HOSTNAME=$(hostname -s)

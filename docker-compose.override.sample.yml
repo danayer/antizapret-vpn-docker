@@ -112,6 +112,8 @@ services:
       # ---------------------------------------------------------------------------
       # To enable IPv6 egress for az-local (Singlebox mode), uncomment the lines
       # below and configure the domains in config/antizapret/ipv6-egress-domains-local.txt.
+      # The IPv6 Docker network is created automatically by docker-compose.yml
+      # (enable_ipv6: true); no manual docker network create is required.
       #
       # IPV6_EGRESS_LOCAL_ENABLED=1   # Enable IPv6 egress on az-local (0=off, 1=on)
       # IPV6_EGRESS_LOCAL_FILE=/root/antizapret/config/ipv6-egress-domains-local.txt
