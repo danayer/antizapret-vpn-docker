@@ -203,15 +203,15 @@ Open the AdGuard Home web panel at `https://your-server:1443/#custom_rules` and 
 
 ```
 # Authorize example.com for IPv6 egress on az-local
-||example.com^$dnsrewrite=127.0.0.1,client=az-ipv6-local,important
+||example.com^$dnsrewrite,client=az-ipv6-local,important
 
 # Authorize example.com for IPv6 egress on az-world
-||example.com^$dnsrewrite=127.0.0.1,client=az-ipv6-world,important
+||example.com^$dnsrewrite,client=az-ipv6-world,important
 ```
 
 The `important` flag ensures the specific rule overrides the catch-all `||*^$dnsrewrite=SERVFAIL`
-rule for the IPv6 egress ClientIDs. The IP `127.0.0.1` is a marker — `dnsmap` only checks whether
-AdGuard returns NOERROR (authorized) or SERVFAIL (not authorized); the actual IP is not used.
+rule for the IPv6 egress ClientIDs. The bare `$dnsrewrite` (without a value) cancels the catch-all
+rule; `dnsmap` only checks whether AdGuard returns NOERROR (authorized) or SERVFAIL (not authorized).
 
 Subdomains are automatically covered: a rule for `example.com` also matches `www.example.com`,
 `api.example.com`, etc.
@@ -305,7 +305,7 @@ The following ClientIDs are pre-configured in `services/adguard/AdGuardHome.yaml
 Add specific domain rules with `important` to override the catch-all:
 
 ```
-||example.com^$dnsrewrite=127.0.0.1,client=az-ipv6-local,important
+||example.com^$dnsrewrite,client=az-ipv6-local,important
 ```
 
 ### Environment variables

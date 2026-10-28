@@ -1422,17 +1422,17 @@ graph TD
 
 ```
 # Авторизовать example.com для IPv6 Egress на az-local
-||example.com^$dnsrewrite=127.0.0.1,client=az-ipv6-local,important
+||example.com^$dnsrewrite,client=az-ipv6-local,important
 
 # Авторизовать example.com для IPv6 Egress на az-world
-||example.com^$dnsrewrite=127.0.0.1,client=az-ipv6-world,important
+||example.com^$dnsrewrite,client=az-ipv6-world,important
 ```
 
 Флаг `important` гарантирует, что конкретное правило переопределяет правило catch-all
-`||*^$dnsrewrite=SERVFAIL,client=az-ipv6-*`. IP `127.0.0.1` — маркер: `dnsmap` проверяет только,
-вернул ли AdGuard NOERROR (авторизовано) или SERVFAIL (не авторизовано); реальный IP не используется.
-Поддомены покрываются автоматически: правило для `example.com` также покрывает `www.example.com`,
-`api.example.com` и т.д.
+`||*^$dnsrewrite=SERVFAIL,client=az-ipv6-*`. Пустое значение `$dnsrewrite` (без `=...`) отменяет
+правило catch-all; `dnsmap` проверяет только, вернул ли AdGuard NOERROR (авторизовано) или
+SERVFAIL (не авторизовано). Поддомены покрываются автоматически: правило для `example.com`
+также покрывает `www.example.com`, `api.example.com` и т.д.
 
 #### Шаг 2: Включите IPv6 Egress для каждого узла выхода
 
@@ -1472,7 +1472,7 @@ services:
 Добавьте правила для конкретных доменов с флагом `important`, чтобы переопределить catch-all:
 
 ```
-||example.com^$dnsrewrite=127.0.0.1,client=az-ipv6-local,important
+||example.com^$dnsrewrite,client=az-ipv6-local,important
 ```
 
 ### Переменные окружения
