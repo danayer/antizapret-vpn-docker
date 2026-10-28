@@ -258,7 +258,7 @@ if [ -n "$IPV6_EGRESS_ENABLED_VAR" ]; then
         # Ensure the mapping file exists for the translator
         [ ! -f "$DEFAULT_IPV6_MAPPING_FILE" ] && touch "$DEFAULT_IPV6_MAPPING_FILE"
         # Start the IPv4→IPv6 translator service
-        postrun "IPV6_MAPPING_FILE=$DEFAULT_IPV6_MAPPING_FILE python3 /root/antizapret/ipv6_translator.py"
+        postrun "IPV6_MAPPING_FILE=$DEFAULT_IPV6_MAPPING_FILE IPV6_TRANSLATOR_PORT=$IPV6_TRANSLATOR_PORT python3 /root/antizapret/ipv6_translator.py"
         echo "IPv6 egress translator started for $CLIENT on port $IPV6_TRANSLATOR_PORT"
         DNSMAP_EXTRA_ARGS="--ipv6-egress-file $IPV6_EGRESS_FILE --ipv6-translator-port $IPV6_TRANSLATOR_PORT --ipv6-egress-client-id $IPV6_EGRESS_CLIENT_ID --ipv6-egress-enabled --ipv6-mapping-file $DEFAULT_IPV6_MAPPING_FILE --ipv6-egress-mode $IPV6_EGRESS_MODE --ipv6-egress-reserve-count $IPV6_EGRESS_RESERVE_COUNT"
     else

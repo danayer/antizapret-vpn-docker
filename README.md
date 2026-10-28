@@ -516,9 +516,12 @@ both the local and world domain lists using the `14.16.0.0/15` range.
    curl -fsSL https://get.docker.com -o get-docker.sh
    sudo sh get-docker.sh
    ```
-   Minimum versions: Docker Engine 20.10+ and Compose v2 (Compose CLI v1.28.0+). The IPv6
-   bridge network with `enable_ipv6: true` is created automatically by Compose on
-   `docker compose up`; no manual `docker network create` is required.
+   Minimum versions: Docker Engine 20.10+ and Compose v2 (Compose CLI v1.28.0+).
+   The automatic IPv6 ULA bridge network (`enable_ipv6: true` without an explicit
+   IPv6 subnet) requires Docker Engine 27.0.0+; on older engines specify an explicit
+   IPv6 subnet in the `ipv6` network `ipam.config` or upgrade the engine. The IPv6
+   bridge network is created automatically by Compose on `docker compose up`; no
+   manual `docker network create` is required.
 1. Clone repository and start container:
    ```bash
    git clone https://github.com/xtrime-ru/antizapret-vpn-docker.git antizapret

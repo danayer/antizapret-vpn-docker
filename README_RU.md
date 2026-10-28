@@ -143,9 +143,12 @@ https://t.me/antizapret_support
    curl -fsSL https://get.docker.com -o get-docker.sh
    sudo sh get-docker.sh
    ```
-   Минимальные версии: Docker Engine 20.10+ и Compose v2 (Compose CLI v1.28.0+). IPv6 bridge-сеть
-   с `enable_ipv6: true` создаётся автоматически Compose при `docker compose up`; ручной
-   `docker network create` не требуется.
+   Минимальные версии: Docker Engine 20.10+ и Compose v2 (Compose CLI v1.28.0+).
+   Автоматическое выделение ULA IPv6-подсети (сеть с `enable_ipv6: true` без
+   явной IPv6-подсети) требует Docker Engine 27.0.0+; на более старых движках
+   укажите явную IPv6-подсеть в `ipam.config` сети `ipv6` или обновите движок.
+   IPv6 bridge-сеть с `enable_ipv6: true` создаётся автоматически Compose при
+   `docker compose up`; ручной `docker network create` не требуется.
 1. Клонируйте репозиторий и запустите контейнер:
    ```bash
    git clone https://github.com/xtrime-ru/antizapret-vpn-docker.git antizapret

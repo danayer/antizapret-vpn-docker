@@ -33,11 +33,13 @@ import sys
 import threading
 import time
 
-# SO_ORIGINAL_DST / IP_RECVORIGDSTADDR constant (Linux-specific, value 80)
-# Used with getsockopt() to retrieve original destination, and with setsockopt()
-# to enable receiving original destination as ancillary data via recvmsg().
+# SO_ORIGINAL_DST (value 80) is a getsockopt() option used on a connected
+# socket to retrieve the original destination of a redirected connection.
+# IP_ORIGDSTADDR / IP_RECVORIGDSTADDR (value 20) is the setsockopt() option
+# used to receive the original destination as ancillary data via recvmsg().
+# They are distinct Linux socket options and must not share a value.
 SO_ORIGINAL_DST = 80
-IP_RECVORIGDSTADDR = 80
+IP_RECVORIGDSTADDR = 20
 SOL_IP = 0
 
 MAPPING_FILE = '/root/antizapret/result/ipv6-egress-mappings.txt'
@@ -130,21 +132,31 @@ def parse_original_destination(data):
 
 
 def relay_tcp(src_sock, dst_sock):
-    """Relay TCP bidirectionally and transparently.
+    """Relay TCP bidirectionally and transparently with proper half-close.
 
     No payload inspection, buffering or modification happens on the normal
-    path. Half-close is honoured: when one direction reaches EOF, the write
-    side of the other socket is shut down so the peer can finish sending its
-    remaining data. When either direction ends, both sockets are closed so
-    the other relay thread does not hang indefinitely.
+    path. TLS payloads and SNI are forwarded byte-for-byte; no diagnostic
+    inspection is enabled unless IPV6_TRANSLATOR_DEBUG is set.
+
+    Half-close coordination: when one direction reaches EOF, the write side of
+    the opposite socket is shut down (SHUT_WR) so the remote peer learns no
+    more data is coming on that direction, while the socket stays open for the
+    reverse direction to finish delivering data. Both sockets are closed only
+    after both relay threads have finished, so an outgoing socket is never
+    closed while the reverse direction still needs to transfer data. On a real
+    socket error both directions are aborted (SHUT_RDWR) to avoid hanging.
     """
+    state = {'errors': 0}
+    state_lock = threading.Lock()
+
     def _forward(src, dst):
         try:
             while True:
                 data = src.recv(RELAY_BUFFER_SIZE)
                 if not data:
-                    # Peer shut down its write side. Tell dst we will not send
-                    # more data, but keep receiving until dst closes too.
+                    # Local side done writing to dst; tell dst peer no more
+                    # data is coming on this direction. Keep dst open so the
+                    # reverse direction can still deliver its remaining data.
                     try:
                         dst.shutdown(socket.SHUT_WR)
                     except OSError:
@@ -152,14 +164,11 @@ def relay_tcp(src_sock, dst_sock):
                     return
                 dst.sendall(data)
         except (OSError, ConnectionError):
-            pass
-        finally:
+            with state_lock:
+                state['errors'] += 1
+            # Abort both directions on error so the other thread does not hang.
             try:
                 dst.shutdown(socket.SHUT_RDWR)
-            except OSError:
-                pass
-            try:
-                dst.close()
             except OSError:
                 pass
 
@@ -169,6 +178,16 @@ def relay_tcp(src_sock, dst_sock):
     t2.start()
     t1.join()
     t2.join()
+
+    # Both directions finished: release the sockets exactly once.
+    try:
+        src_sock.close()
+    except OSError:
+        pass
+    try:
+        dst_sock.close()
+    except OSError:
+        pass
 
 
 def handle_tcp_connection(conn, addr, mapping_table):
@@ -387,10 +406,14 @@ def extract_original_dst_from_cmsg(msg):
     try:
         for cmsg_level, cmsg_type, cmsg_data in msg[1]:
             if cmsg_level == SOL_IP and cmsg_type == IP_RECVORIGDSTADDR:
-                # cmsg_data is a struct sockaddr_in (16 bytes):
-                #   sin_family (2 bytes) + sin_port (2 bytes) + sin_addr (4 bytes) + sin_zero (8 bytes)
+                # cmsg_data is a struct sockaddr_in (16 bytes) per Linux ABI:
+                #   sin_family (2 bytes, HOST byte order)
+                #   sin_port (2 bytes, NETWORK byte order)
+                #   sin_addr (4 bytes, NETWORK byte order)
+                #   sin_zero (8 bytes padding)
+                # sin_family is host byte order, unlike sin_port/sin_addr.
                 if len(cmsg_data) >= 8:
-                    family = struct.unpack('!H', cmsg_data[0:2])[0]
+                    family = struct.unpack('H', cmsg_data[0:2])[0]
                     if family == socket.AF_INET:
                         port = struct.unpack('!H', cmsg_data[2:4])[0]
                         ip = socket.inet_ntoa(cmsg_data[4:8])
@@ -455,10 +478,18 @@ def handle_udp_packet(data, src_addr, orig_dst_ip, orig_dst_port, mapping_table,
 def run_udp_server(listen_addr, listen_port, mapping_table, upstream_pool):
     """Run the UDP translator server.
 
-    Uses IP_RECVORIGDSTADDR ancillary data via recvmsg() to recover the original
-    destination address before DNAT redirected the packet to this translator.
-    If the socket option is unavailable (e.g. restricted kernel), falls back to
-    getsockopt(SO_ORIGINAL_DST) per packet, which is less reliable.
+    Uses IP_ORIGDSTADDR (IP_RECVORIGDSTADDR) ancillary data via recvmsg() to
+    recover the original destination address before DNAT redirected the packet
+    to this translator. This is the only reliable way to determine the original
+    destination of each individual UDP datagram on an unconnected listening
+    socket.
+
+    If the socket option is unavailable (e.g. restricted kernel/container),
+    per-datagram original destination cannot be determined reliably:
+    getsockopt(SO_ORIGINAL_DST) on an unconnected UDP socket is not a
+    per-datagram mechanism and must not be used to forward packets to a guessed
+    address. In that case every datagram is dropped with a one-time diagnostic
+    instead of being redirected to the wrong peer.
     """
     listen_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     listen_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -469,48 +500,35 @@ def run_udp_server(listen_addr, listen_port, mapping_table, upstream_pool):
         listen_sock.setsockopt(SOL_IP, IP_RECVORIGDSTADDR, 1)
     except OSError as error:
         recv_orig_dst_available = False
-        print('translator: IP_RECVORIGDSTADDR unavailable: {} (UDP original destination '
-              'may be unreliable; falling back to SO_ORIGINAL_DST)'.format(error))
+        print('translator: IP_ORIGDSTADDR/IP_RECVORIGDSTADDR unavailable: {} '
+              '(UDP original destination cannot be determined per datagram; '
+              'UDP packets will be dropped)'.format(error))
 
     listen_sock.bind((listen_addr, listen_port))
     print('translator: listening on {}:{} (UDP)'.format(listen_addr, listen_port))
 
-    _getsockopt_warned = False
+    _orig_dst_unavailable_warned = False
 
     while True:
         try:
-            data = None
-            src_addr = None
-            orig_dst_ip = orig_dst_port = None
-            if recv_orig_dst_available:
-                # recvmsg() returns: (data, ancdata, flags, address)
-                data, ancdata, flags, src_addr = listen_sock.recvmsg(
-                    RELAY_BUFFER_SIZE,
-                    socket.CMSG_SPACE(16)  # Space for sockaddr_in ancillary data
-                )
+            # recvmsg() returns: (data, ancdata, flags, address)
+            data, ancdata, flags, src_addr = listen_sock.recvmsg(
+                RELAY_BUFFER_SIZE,
+                socket.CMSG_SPACE(16)  # Space for sockaddr_in ancillary data
+            )
 
-                # Extract original destination from ancillary data
-                orig_dst_ip, orig_dst_port = extract_original_dst_from_cmsg(
-                    (data, ancdata, flags, src_addr)
-                )
-            else:
-                # Fallback for kernels/containers without IP_RECVORIGDSTADDR:
-                # block on recvfrom, then best-effort SO_ORIGINAL_DST.
-                data, src_addr = listen_sock.recvfrom(RELAY_BUFFER_SIZE)
-                try:
-                    orig_dst = listen_sock.getsockopt(socket.SOL_IP, SO_ORIGINAL_DST, 16)
-                    orig_dst_ip, orig_dst_port = parse_original_destination(orig_dst)
-                except (OSError, struct.error):
-                    orig_dst_ip = orig_dst_port = None
+            # Extract original destination from ancillary data
+            orig_dst_ip, orig_dst_port = extract_original_dst_from_cmsg(
+                (data, ancdata, flags, src_addr)
+            )
 
             if orig_dst_ip is None or orig_dst_port is None:
                 # Original destination could not be determined reliably.
-                # Report once, then drop the packet rather than silently
-                # forwarding it to the wrong peer.
-                if not recv_orig_dst_available and not _getsockopt_warned:
-                    _getsockopt_warned = True
-                    print('translator: failed to get original destination for UDP '
-                          '(SO_ORIGINAL_DST unavailable; UDP packets dropped)')
+                # Drop the datagram rather than forwarding to a wrong peer.
+                if not recv_orig_dst_available and not _orig_dst_unavailable_warned:
+                    _orig_dst_unavailable_warned = True
+                    print('translator: IP_ORIGDSTADDR unavailable; cannot determine '
+                          'original destination per UDP packet; dropping UDP packets')
                 continue
 
             t = threading.Thread(

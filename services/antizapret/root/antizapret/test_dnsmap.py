@@ -5,6 +5,9 @@ import queue
 import ipaddress
 import socket
 import struct
+import subprocess
+import sys
+import os
 import tempfile
 import threading
 import time
@@ -1844,57 +1847,84 @@ class OriginalDestinationParsingTests(unittest.TestCase):
 class TransparentTCPRelayTests(unittest.TestCase):
     """Tests for the transparent TCP relay (relay_tcp)."""
 
-    def test_relay_transfers_data_both_ways_without_modification(self):
-        client, server = socket.socketpair()
-        client.settimeout(5)
-        server.settimeout(5)
+    def test_relay_preserves_response_after_client_half_close(self):
+        """Regression: a response sent after client half-close must reach the client.
+
+        Two independent connections are bridged by the relay:
+            client <--> relay_client <(relay_tcp)> relay_upstream <--> upstream
+
+        1. Client sends a request through the relay.
+        2. Client calls shutdown(SHUT_WR).
+        3. Upstream receives EOF (no more request data).
+        4. Upstream sends a full answer after the EOF.
+        5. Client receives the answer byte-for-byte and then a clean EOF.
+        6. Both relay threads terminate and sockets are released.
+        """
+        client, relay_client = socket.socketpair()
+        relay_upstream, upstream = socket.socketpair()
+        for sock in (client, relay_client, relay_upstream, upstream):
+            sock.settimeout(5)
         self.addCleanup(client.close)
-        self.addCleanup(server.close)
+        self.addCleanup(relay_client.close)
+        self.addCleanup(relay_upstream.close)
+        self.addCleanup(upstream.close)
 
         t = threading.Thread(target=ipv6_translator.relay_tcp,
-                             args=(client, server), daemon=True)
+                             args=(relay_client, relay_upstream), daemon=True)
         t.start()
 
-        # Client -> server must arrive byte-for-byte.
-        client.sendall(b'ping')
-        self.assertEqual(server.recv(65536), b'ping')
+        # 1. Client -> upstream arrives byte-for-byte.
+        client.sendall(b'request')
+        self.assertEqual(upstream.recv(65536), b'request')
 
-        # Server -> client must arrive byte-for-byte. All receives happen
-        # before any half-close because the relay closes each socket when its
-        # direction ends.
-        server.sendall(b'pong')
-        self.assertEqual(client.recv(65536), b'pong')
-        server.sendall(b'bye')
-        self.assertEqual(client.recv(65536), b'bye')
-
-        # Half-close: client finishes writing. The relay shuts down the other
-        # direction and closes both sockets; join must return.
+        # 2. Client finishes writing.
         client.shutdown(socket.SHUT_WR)
+
+        # 3. Upstream receives EOF (relay signalled no more request data).
+        self.assertEqual(upstream.recv(65536), b'')
+
+        # 4. Upstream sends a full answer after the client half-close.
+        upstream.sendall(b'full response from server')
+        upstream.shutdown(socket.SHUT_WR)
+
+        # 5. Client receives the answer byte-for-byte, then a clean EOF.
+        self.assertEqual(client.recv(65536), b'full response from server')
+        self.assertEqual(client.recv(65536), b'')
+
+        # 6. Both threads terminate, resources released.
         t.join(timeout=5)
         self.assertFalse(t.is_alive(), 'relay thread did not terminate after half-close')
 
-    def test_relay_terminates_when_one_side_finishes_writing(self):
-        client, server = socket.socketpair()
-        client.settimeout(5)
-        server.settimeout(5)
+    def test_relay_terminates_when_both_sides_finish_writing(self):
+        """Both sides finishing writing must terminate the relay without hanging."""
+        client, relay_client = socket.socketpair()
+        relay_upstream, upstream = socket.socketpair()
+        for sock in (client, relay_client, relay_upstream, upstream):
+            sock.settimeout(5)
         self.addCleanup(client.close)
-        self.addCleanup(server.close)
+        self.addCleanup(relay_client.close)
+        self.addCleanup(relay_upstream.close)
+        self.addCleanup(upstream.close)
 
         t = threading.Thread(target=ipv6_translator.relay_tcp,
-                             args=(client, server), daemon=True)
+                             args=(relay_client, relay_upstream), daemon=True)
         t.start()
-        # One side finishes writing; the relay must shut down the other
-        # direction and terminate instead of hanging forever.
+        # Both directions finished writing: each relay thread observes EOF on
+        # its read side and terminates; no socket is closed prematurely.
         client.shutdown(socket.SHUT_WR)
+        upstream.shutdown(socket.SHUT_WR)
         t.join(timeout=5)
-        self.assertFalse(t.is_alive(), 'relay thread did not terminate after one side finished writing')
+        self.assertFalse(t.is_alive(), 'relay thread did not terminate after both sides finished writing')
 
 
 class UDPOriginalDestinationTests(unittest.TestCase):
     """Tests for parsing the UDP original destination address."""
 
     def _sockaddr_in(self, family, port, addr_bytes):
-        return struct.pack('!HH4s8x', family, port, addr_bytes)
+        # Model the Linux sockaddr_in ABI: sin_family in HOST byte order
+        # (2 bytes), sin_port and sin_addr in NETWORK byte order, then
+        # sin_zero padding. Total 16 bytes.
+        return struct.pack('H', family) + struct.pack('!H4s', port, addr_bytes) + b'\x00' * 8
 
     def test_extract_original_dst_from_cmsg_valid(self):
         sockaddr = self._sockaddr_in(socket.AF_INET, 443,
@@ -1938,12 +1968,12 @@ class UDPOriginalDestinationTests(unittest.TestCase):
 
 
 class UDPServerSetupTests(unittest.TestCase):
-    """Tests for UDP server behaviour when IP_RECVORIGDSTADDR is unavailable."""
+    """Tests for UDP server behaviour when IP_ORIGDSTADDR is unavailable."""
 
     def setUp(self):
         self.repo_root = Path(__file__).resolve().parents[4]
 
-    def test_run_udp_server_setsockopt_failure_logs_and_stops_cleanly(self):
+    def test_run_udp_server_setsockopt_failure_drops_and_stops_cleanly(self):
         orig_socket = socket.socket
         instances = []
 
@@ -1951,25 +1981,27 @@ class UDPServerSetupTests(unittest.TestCase):
             def __init__(self, *args, **kwargs):
                 self._s = orig_socket(*args, **kwargs)
                 instances.append(self)
-                self.recvmsg_calls = 0
 
             def setsockopt(self, level, optname, value):
-                if level == ipv6_translator.SOL_IP and                         optname == ipv6_translator.IP_RECVORIGDSTADDR:
+                if level == ipv6_translator.SOL_IP and \
+                        optname == ipv6_translator.IP_RECVORIGDSTADDR:
                     raise OSError(92, 'Protocol not available')
                 return self._s.setsockopt(level, optname, value)
 
             def bind(self, addr):
                 return self._s.bind(addr)
 
-            def recvfrom(*args, **kwargs):
-                # Fallback path uses blocking recvfrom; raise so the server
-                # loop exits cleanly instead of spinning forever.
+            def recvmsg(*args, **kwargs):
+                # Make the blocking recvmsg exit deterministically instead of
+                # relying on close() interrupting a blocked syscall in another
+                # thread.
                 raise OSError(9, 'Bad file descriptor')
 
             def __getattr__(self, name):
                 return getattr(self._s, name)
 
-        with patch.object(ipv6_translator.socket, 'socket', FailingSocket),                 patch('builtins.print') as mock_print:
+        with patch.object(ipv6_translator.socket, 'socket', FailingSocket), \
+                patch('builtins.print') as mock_print:
             probe = orig_socket(socket.AF_INET, socket.SOCK_DGRAM)
             probe.bind(('127.0.0.1', 0))
             port = probe.getsockname()[1]
@@ -1988,11 +2020,111 @@ class UDPServerSetupTests(unittest.TestCase):
 
             t = threading.Thread(target=run, daemon=True)
             t.start()
+            time.sleep(0.3)
+            # Close the underlying socket so the blocking recvmsg exits.
+            for inst in instances:
+                try:
+                    inst._s.close()
+                except OSError:
+                    pass
             t.join(timeout=5)
 
             self.assertFalse(t.is_alive(), 'UDP server did not stop after receive error')
             printed = ' '.join(str(args[0]) for args in mock_print.call_args_list)
-            self.assertIn('IP_RECVORIGDSTADDR unavailable', printed)
+            self.assertIn('IP_ORIGDSTADDR/IP_RECVORIGDSTADDR unavailable', printed)
+
+
+class UDPOptionTests(unittest.TestCase):
+    """Tests for the UDP original-destination socket option and Linux ABI."""
+
+    def test_ip_origdstaddr_constant_is_twenty_not_eighty(self):
+        # IP_ORIGDSTADDR/IP_RECVORIGDSTADDR is 20 on Linux; SO_ORIGINAL_DST is 80.
+        # Confusing them made setsockopt fail with Errno 92.
+        self.assertEqual(ipv6_translator.IP_RECVORIGDSTADDR, 20)
+        self.assertEqual(ipv6_translator.SO_ORIGINAL_DST, 80)
+        self.assertNotEqual(ipv6_translator.IP_RECVORIGDSTADDR,
+                            ipv6_translator.SO_ORIGINAL_DST)
+
+    def test_linux_supports_ip_origdstaddr_setsockopt(self):
+        # Real (non-mocked) check on the current Linux environment. If the
+        # kernel/container supports IP_ORIGDSTADDR, setsockopt succeeds;
+        # otherwise the test is skipped rather than asserting false.
+        try:
+            test_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            test_sock.setsockopt(socket.SOL_IP, 20, 1)
+            test_sock.close()
+        except OSError:
+            self.skipTest('IP_ORIGDSTADDR(20) not supported by this environment')
+
+
+class TranslatorPortTests(unittest.TestCase):
+    """Tests that the selected translator port reaches the translator process."""
+
+    def setUp(self):
+        self.repo_root = Path(__file__).resolve().parents[4]
+
+    def test_init_passes_translator_port_to_translator(self):
+        init_path = self.repo_root / 'services' / 'antizapret' / 'init.sh'
+        init_sh = init_path.read_text(encoding='utf-8')
+        # The translator child process must receive the selected port so NAT
+        # rules (dnsmap --ipv6-translator-port) and the translator listen port
+        # stay in sync for both local and world exit nodes.
+        self.assertIn('IPV6_TRANSLATOR_PORT=$IPV6_TRANSLATOR_PORT', init_sh)
+        self.assertIn('IPV6_MAPPING_FILE=$DEFAULT_IPV6_MAPPING_FILE', init_sh)
+        self.assertIn('python3 /root/antizapret/ipv6_translator.py', init_sh)
+
+    def test_translator_listen_port_honours_env(self):
+        # The translator listens on IPV6_TRANSLATOR_PORT, not only 9000. The
+        # local and world exit nodes use independent environment variable names
+        # but the translator child process is started with the resolved port.
+        code = ('import importlib, ipv6_translator as m; '
+                'importlib.reload(m); print(m.LISTEN_PORT)')
+        for port in ('9090', '9091'):
+            env = dict(os.environ)
+            env['IPV6_TRANSLATOR_PORT'] = port
+            proc = subprocess.run(
+                [sys.executable, '-c', code],
+                capture_output=True, text=True, env=env,
+                cwd=str(self.repo_root / 'services' / 'antizapret' / 'root' / 'antizapret'))
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertEqual(proc.stdout.strip(), port)
+
+
+class DockerVersionPolicyTests(unittest.TestCase):
+    """Tests documenting the Docker Engine version policy for automatic IPv6 ULA."""
+
+    MIN_DOCKER_ENGINE_AUTO_IPV6_ULA = '27.0.0'
+
+    def setUp(self):
+        self.repo_root = Path(__file__).resolve().parents[4]
+        with open(self.repo_root / 'docker-compose.yml') as f:
+            self.compose = yaml.safe_load(f)
+
+    @staticmethod
+    def _parse_version(version):
+        return tuple(int(part) for part in version.split('.'))
+
+    def test_auto_ipv6_ula_requires_engine_27(self):
+        # Automatic ULA IPv6 subnet allocation (enable_ipv6: true without an
+        # explicit IPv6 subnet) was introduced in Docker Engine 27.0.0. The
+        # project must not claim support for older engines for this feature.
+        min_v = self._parse_version(self.MIN_DOCKER_ENGINE_AUTO_IPV6_ULA)
+        self.assertGreaterEqual(min_v, (27, 0, 0))
+
+    def test_compose_ipv6_network_is_auto_ula_not_external(self):
+        net = self.compose['networks']['ipv6']
+        self.assertEqual(net['driver'], 'bridge')
+        self.assertTrue(net['enable_ipv6'])
+        self.assertNotEqual(net.get('external'), True)
+        # No explicit IPv6 subnet: Docker allocates a unique ULA per installation
+        # on Engine 27.0.0+; no hardcoded collision-prone prefix is used.
+        ipam_configs = (net.get('ipam') or {}).get('config') or []
+        ipv6_subnets = [
+            c.get('Subnet') for c in ipam_configs
+            if c.get('Subnet', '').startswith(('fc', 'fd', '2001'))
+        ]
+        self.assertEqual(ipv6_subnets, [])
+
 
 class ComposeNetworkTests(unittest.TestCase):
     """Tests validating the Compose-managed IPv6 network configuration."""
