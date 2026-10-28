@@ -132,7 +132,7 @@ func TestAdaptListIPv6EgressLocalAllowRule(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	requestURL := "/list/?allow=1&client=az-ipv6-local&filter_custom=0&filter_dist=0&file=" + url.QueryEscape(listPath) + "&dnsrewrite=127.0.0.1&suffix=1"
+	requestURL := "/list/?allow=1&client=az-ipv6-local&filter_custom=0&filter_dist=0&file=" + url.QueryEscape(listPath) + "&dnsrewrite=SERVFAIL&suffix=1"
 	request := httptest.NewRequest(http.MethodGet, requestURL, nil)
 	response := httptest.NewRecorder()
 
@@ -143,11 +143,14 @@ func TestAdaptListIPv6EgressLocalAllowRule(t *testing.T) {
 	}
 
 	body := response.Body.String()
-	if !strings.Contains(body, "@@||example.com^$dnsrewrite=127.0.0.1,client=az-ipv6-local") {
+	if !strings.Contains(body, "@@||example.com^$dnsrewrite=SERVFAIL,client=az-ipv6-local") {
 		t.Fatalf("expected local allow rule for example.com, got: %q", body)
 	}
-	if !strings.Contains(body, "@@||api64.ipify.org^$dnsrewrite=127.0.0.1,client=az-ipv6-local") {
+	if !strings.Contains(body, "@@||api64.ipify.org^$dnsrewrite=SERVFAIL,client=az-ipv6-local") {
 		t.Fatalf("expected local allow rule for api64.ipify.org, got: %q", body)
+	}
+	if strings.Contains(body, "dnsrewrite=127.0.0.1") {
+		t.Fatalf("IPv6 Egress allowlist must not contain dnsrewrite=127.0.0.1, got: %q", body)
 	}
 	if strings.Contains(body, "client=az-ipv6-world") {
 		t.Fatalf("local allowlist must not grant world client access, got: %q", body)
@@ -161,7 +164,7 @@ func TestAdaptListIPv6EgressWorldAllowRule(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	requestURL := "/list/?allow=1&client=az-ipv6-world&filter_custom=0&filter_dist=0&file=" + url.QueryEscape(listPath) + "&dnsrewrite=127.0.0.1&suffix=1"
+	requestURL := "/list/?allow=1&client=az-ipv6-world&filter_custom=0&filter_dist=0&file=" + url.QueryEscape(listPath) + "&dnsrewrite=SERVFAIL&suffix=1"
 	request := httptest.NewRequest(http.MethodGet, requestURL, nil)
 	response := httptest.NewRecorder()
 
@@ -172,11 +175,14 @@ func TestAdaptListIPv6EgressWorldAllowRule(t *testing.T) {
 	}
 
 	body := response.Body.String()
-	if !strings.Contains(body, "@@||example.org^$dnsrewrite=127.0.0.1,client=az-ipv6-world") {
+	if !strings.Contains(body, "@@||example.org^$dnsrewrite=SERVFAIL,client=az-ipv6-world") {
 		t.Fatalf("expected world allow rule for example.org, got: %q", body)
 	}
-	if !strings.Contains(body, "@@||api64.ipify.org^$dnsrewrite=127.0.0.1,client=az-ipv6-world") {
+	if !strings.Contains(body, "@@||api64.ipify.org^$dnsrewrite=SERVFAIL,client=az-ipv6-world") {
 		t.Fatalf("expected world allow rule for api64.ipify.org, got: %q", body)
+	}
+	if strings.Contains(body, "dnsrewrite=127.0.0.1") {
+		t.Fatalf("IPv6 Egress allowlist must not contain dnsrewrite=127.0.0.1, got: %q", body)
 	}
 	if strings.Contains(body, "client=az-ipv6-local") {
 		t.Fatalf("world allowlist must not grant local client access, got: %q", body)
@@ -196,13 +202,13 @@ func TestAdaptListIPv6EgressLocalAndWorldIndependent(t *testing.T) {
 
 	// Local request
 	localReq := httptest.NewRequest(http.MethodGet,
-		"/list/?allow=1&client=az-ipv6-local&filter_custom=0&filter_dist=0&file="+url.QueryEscape(localPath)+"&dnsrewrite=127.0.0.1&suffix=1", nil)
+		"/list/?allow=1&client=az-ipv6-local&filter_custom=0&filter_dist=0&file="+url.QueryEscape(localPath)+"&dnsrewrite=SERVFAIL&suffix=1", nil)
 	localResp := httptest.NewRecorder()
 	adaptList(localResp, localReq)
 
 	// World request
 	worldReq := httptest.NewRequest(http.MethodGet,
-		"/list/?allow=1&client=az-ipv6-world&filter_custom=0&filter_dist=0&file="+url.QueryEscape(worldPath)+"&dnsrewrite=127.0.0.1&suffix=1", nil)
+		"/list/?allow=1&client=az-ipv6-world&filter_custom=0&filter_dist=0&file="+url.QueryEscape(worldPath)+"&dnsrewrite=SERVFAIL&suffix=1", nil)
 	worldResp := httptest.NewRecorder()
 	adaptList(worldResp, worldReq)
 
@@ -230,7 +236,7 @@ func TestAdaptListIPv6EgressEmptyFile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	requestURL := "/list/?allow=1&client=az-ipv6-local&filter_custom=0&filter_dist=0&file=" + url.QueryEscape(listPath) + "&dnsrewrite=127.0.0.1&suffix=1"
+	requestURL := "/list/?allow=1&client=az-ipv6-local&filter_custom=0&filter_dist=0&file=" + url.QueryEscape(listPath) + "&dnsrewrite=SERVFAIL&suffix=1"
 	request := httptest.NewRequest(http.MethodGet, requestURL, nil)
 	response := httptest.NewRecorder()
 
@@ -248,7 +254,7 @@ func TestAdaptListIPv6EgressFileNotFound(t *testing.T) {
 	root := useListRoot(t)
 	missingPath := filepath.Join(root, "does-not-exist.txt")
 
-	requestURL := "/list/?allow=1&client=az-ipv6-local&filter_custom=0&filter_dist=0&file=" + url.QueryEscape(missingPath) + "&dnsrewrite=127.0.0.1&suffix=1"
+	requestURL := "/list/?allow=1&client=az-ipv6-local&filter_custom=0&filter_dist=0&file=" + url.QueryEscape(missingPath) + "&dnsrewrite=SERVFAIL&suffix=1"
 	request := httptest.NewRequest(http.MethodGet, requestURL, nil)
 	response := httptest.NewRecorder()
 
@@ -260,7 +266,7 @@ func TestAdaptListIPv6EgressFileNotFound(t *testing.T) {
 }
 
 func TestAdaptListIPv6EgressInvalidPath(t *testing.T) {
-	requestURL := "/list/?allow=1&client=az-ipv6-local&filter_custom=0&filter_dist=0&file=/etc/passwd&dnsrewrite=127.0.0.1&suffix=1"
+	requestURL := "/list/?allow=1&client=az-ipv6-local&filter_custom=0&filter_dist=0&file=/etc/passwd&dnsrewrite=SERVFAIL&suffix=1"
 	request := httptest.NewRequest(http.MethodGet, requestURL, nil)
 	response := httptest.NewRecorder()
 
@@ -278,7 +284,7 @@ func TestAdaptListIPv6EgressCommentsAndBlankLinesIgnored(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	requestURL := "/list/?allow=1&client=az-ipv6-local&filter_custom=0&filter_dist=0&file=" + url.QueryEscape(listPath) + "&dnsrewrite=127.0.0.1&suffix=1"
+	requestURL := "/list/?allow=1&client=az-ipv6-local&filter_custom=0&filter_dist=0&file=" + url.QueryEscape(listPath) + "&dnsrewrite=SERVFAIL&suffix=1"
 	request := httptest.NewRequest(http.MethodGet, requestURL, nil)
 	response := httptest.NewRecorder()
 
@@ -290,7 +296,7 @@ func TestAdaptListIPv6EgressCommentsAndBlankLinesIgnored(t *testing.T) {
 
 	body := response.Body.String()
 	// Only one rule should be generated (for example.com)
-	count := strings.Count(body, "@@||example.com^$dnsrewrite=127.0.0.1,client=az-ipv6-local")
+	count := strings.Count(body, "@@||example.com^$dnsrewrite=SERVFAIL,client=az-ipv6-local")
 	if count != 1 {
 		t.Fatalf("expected exactly 1 allow rule for example.com, got %d: %q", count, body)
 	}

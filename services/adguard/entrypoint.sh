@@ -61,12 +61,23 @@ echo "$CONFIG_MD5" > /dev/shm/.config_md5
 function ensure_filter () {
     local filter_url="$1"
     local filter_name="$2"
-    local filter_id
 
-    if FILTER_URL="$filter_url" yq -e '.filters[] | select(.url == strenv(FILTER_URL))' /opt/adguardhome/conf/AdGuardHome.yaml >/dev/null; then
+    # Check if a filter with this name already exists
+    if FILTER_NAME="$filter_name" yq -e '.filters[] | select(.name == strenv(FILTER_NAME))' /opt/adguardhome/conf/AdGuardHome.yaml >/dev/null 2>&1; then
+        # Filter exists by name - check if URL matches
+        if FILTER_NAME="$filter_name" FILTER_URL="$filter_url" yq -e '.filters[] | select(.name == strenv(FILTER_NAME) and .url == strenv(FILTER_URL))' /opt/adguardhome/conf/AdGuardHome.yaml >/dev/null 2>&1; then
+            # URL matches, nothing to do
+            return
+        fi
+        # URL differs - update existing filter, preserving its ID and enabled state
+        FILTER_NAME="$filter_name" FILTER_URL="$filter_url" yq -i '
+            (.filters[] | select(.name == strenv(FILTER_NAME)) | .url) = strenv(FILTER_URL)
+        ' /opt/adguardhome/conf/AdGuardHome.yaml || exit 1
         return
     fi
 
+    # Filter doesn't exist - create new
+    local filter_id
     filter_id=$(yq -r '([.filters[].id] | max // 0) + 1' /opt/adguardhome/conf/AdGuardHome.yaml)
     FILTER_URL="$filter_url" FILTER_NAME="$filter_name" FILTER_ID="$filter_id" yq -i '
         .filters += [{
@@ -86,10 +97,10 @@ ensure_filter 'http://az-world.antizapret/list/?regex=1&allow=0&client=az-resolv
 # the catch-all ||*^$dnsrewrite=SERVFAIL,client=az-ipv6-* in user_rules.
 # Only the Local filter is added in Compose mode; the World filter requires
 # az-world (Swarm mode, AZ_WORLD_ENABLED=1).
-ensure_filter 'http://az-local.antizapret/list/?allow=1&client=az-ipv6-local&filter_custom=0&filter_dist=0&file=/root/antizapret/config/ipv6-egress-domains-local.txt&dnsrewrite=127.0.0.1&suffix=1' 'IPv6 Egress Local Rules'
+ensure_filter 'http://az-local.antizapret/list/?allow=1&client=az-ipv6-local&filter_custom=0&filter_dist=0&file=/root/antizapret/config/ipv6-egress-domains-local.txt&dnsrewrite=SERVFAIL&suffix=1' 'IPv6 Egress Local Rules'
 
 if [ "$AZ_WORLD_ENABLED" = "1" ]; then
-    ensure_filter 'http://az-world.antizapret/list/?allow=1&client=az-ipv6-world&filter_custom=0&filter_dist=0&file=/root/antizapret/config/ipv6-egress-domains-world.txt&dnsrewrite=127.0.0.1&suffix=1' 'IPv6 Egress World Rules'
+    ensure_filter 'http://az-world.antizapret/list/?allow=1&client=az-ipv6-world&filter_custom=0&filter_dist=0&file=/root/antizapret/config/ipv6-egress-domains-world.txt&dnsrewrite=SERVFAIL&suffix=1' 'IPv6 Egress World Rules'
 fi
 
 # AdGuard's migration to schema 34 replaces http.doh with the legacy TLS flag.
