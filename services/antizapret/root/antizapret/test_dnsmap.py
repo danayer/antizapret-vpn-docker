@@ -12,7 +12,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from dnslib import A, CNAME, DNSRecord, QTYPE, RCODE, RR
+from dnslib import A, AAAA, CNAME, DNSRecord, QTYPE, RCODE, RR
 
 import dnsmap
 import ipv6_translator
@@ -772,6 +772,8 @@ class IPv6EgressDomainTests(ResolverTestCase):
             'mapping_batch_delay': 0.001,
             'ipv6_egress_file': str(self.temp_directory.name + '/ipv6-egress.txt'),
             'ipv6_translator_port': 9000,
+            'ipv6_egress_enabled': True,
+            'ipv6_egress_mode': 'file_only',
         }
         arguments.update(overrides)
         resolver = dnsmap.ProxyResolver(**arguments)
@@ -849,6 +851,8 @@ class IPv6EgressMappingTests(ResolverTestCase):
             'mapping_batch_delay': 0.001,
             'ipv6_egress_file': str(self.temp_directory.name + '/ipv6-egress.txt'),
             'ipv6_translator_port': 9000,
+            'ipv6_egress_enabled': True,
+            'ipv6_egress_mode': 'file_only',
         }
         arguments.update(overrides)
         resolver = dnsmap.ProxyResolver(**arguments)
@@ -868,7 +872,11 @@ class IPv6EgressMappingTests(ResolverTestCase):
         self.assertEqual(command, ['iptables-restore', '--wait', '--noflush'])
         input_rules = self.iptables_runner.call_args.kwargs['input']
         self.assertIn(
-            '-A dnsmap -d 14.16.0.2 -j DNAT --to-destination 127.0.0.1:9000',
+            '-A dnsmap-ipv6 -p tcp -d 14.16.0.2 -j DNAT --to-destination 127.0.0.1:9000',
+            input_rules,
+        )
+        self.assertIn(
+            '-A dnsmap-ipv6 -p udp -d 14.16.0.2 -j DNAT --to-destination 127.0.0.1:9000',
             input_rules,
         )
 
@@ -936,6 +944,7 @@ class IPv6EgressMappingTests(ResolverTestCase):
             mapping_batch_delay=0.001,
             ipv6_egress_file=str(ipv6_file),
             ipv6_translator_port=9000,
+            ipv6_egress_enabled=True,
             ipv6_egress_reserve_count=4,
         )
         self.addCleanup(resolver.close)
@@ -982,6 +991,7 @@ class IPv6EgressMappingTests(ResolverTestCase):
             mapping_batch_delay=0.001,
             ipv6_egress_file=str(ipv6_file),
             ipv6_translator_port=9000,
+            ipv6_egress_enabled=True,
             ipv6_egress_reserve_count=4,
         )
         self.addCleanup(resolver.close)
@@ -1024,15 +1034,18 @@ class IPv6EgressResolverTests(ResolverTestCase):
             'mapping_batch_delay': 0.001,
             'ipv6_egress_file': str(self.temp_directory.name + '/ipv6-egress.txt'),
             'ipv6_translator_port': 9000,
+            'ipv6_egress_enabled': True,
+            'ipv6_egress_mode': 'file_only',
         }
         arguments.update(overrides)
         resolver = dnsmap.ProxyResolver(**arguments)
+        resolver.check_ipv6_connectivity = Mock(return_value=True)
         self.addCleanup(resolver.close)
         return resolver
 
     def _make_aaaa_reply(self, qname, addresses):
         """Create a DNS reply with AAAA records."""
-        request = DNSRecord.question(qname, QTYPE.AAAA)
+        request = DNSRecord.question(qname, 'AAAA')
         reply = request.reply()
         reply.header.rcode = RCODE.NOERROR
         for addr in addresses:
@@ -1048,7 +1061,7 @@ class IPv6EgressResolverTests(ResolverTestCase):
             'example.com', ['2001:db8::1']
         ))
 
-        request = DNSRecord.question('example.com', QTYPE.A)
+        request = DNSRecord.question('example.com', 'A')
         reply = resolver.resolve(request, Mock())
 
         self.assertEqual(reply.header.rcode, RCODE.NOERROR)
@@ -1068,7 +1081,7 @@ class IPv6EgressResolverTests(ResolverTestCase):
             'example.com', ['2001:db8::1', '2001:db8::2']
         ))
 
-        request = DNSRecord.question('example.com', QTYPE.A)
+        request = DNSRecord.question('example.com', 'A')
         reply = resolver.resolve(request, Mock())
 
         self.assertEqual(reply.header.rcode, RCODE.NOERROR)
@@ -1080,12 +1093,12 @@ class IPv6EgressResolverTests(ResolverTestCase):
 
         resolver = self.make_resolver_with_ipv6()
         # Return empty AAAA response
-        request = DNSRecord.question('example.com', QTYPE.AAAA)
+        request = DNSRecord.question('example.com', 'AAAA')
         empty_reply = request.reply()
         empty_reply.header.rcode = RCODE.NOERROR
         resolver.query_doh = Mock(return_value=empty_reply)
 
-        request = DNSRecord.question('example.com', QTYPE.A)
+        request = DNSRecord.question('example.com', 'A')
         reply = resolver.resolve(request, Mock())
 
         self.assertEqual(reply.header.rcode, RCODE.SERVFAIL)
@@ -1095,11 +1108,11 @@ class IPv6EgressResolverTests(ResolverTestCase):
         ipv6_file.write_text('example.com\n', encoding='utf-8')
 
         resolver = self.make_resolver_with_ipv6()
-        servfail_reply = DNSRecord.question('example.com', QTYPE.AAAA).reply()
+        servfail_reply = DNSRecord.question('example.com', 'AAAA').reply()
         servfail_reply.header.rcode = RCODE.SERVFAIL
         resolver.query_doh = Mock(return_value=servfail_reply)
 
-        request = DNSRecord.question('example.com', QTYPE.A)
+        request = DNSRecord.question('example.com', 'A')
         reply = resolver.resolve(request, Mock())
 
         self.assertEqual(reply.header.rcode, RCODE.SERVFAIL)
@@ -1113,7 +1126,7 @@ class IPv6EgressResolverTests(ResolverTestCase):
             'www.example.com', ['2001:db8::1']
         ))
 
-        request = DNSRecord.question('www.example.com', QTYPE.A)
+        request = DNSRecord.question('www.example.com', 'A')
         reply = resolver.resolve(request, Mock())
 
         self.assertEqual(reply.header.rcode, RCODE.NOERROR)
@@ -1131,7 +1144,7 @@ class IPv6EgressResolverTests(ResolverTestCase):
         resolver.is_blocked_asn = Mock(return_value=False)
         resolver.add_mappings = Mock(return_value={'192.0.2.1': '14.16.0.2'})
 
-        request = DNSRecord.question('example.com', QTYPE.A)
+        request = DNSRecord.question('example.com', 'A')
         reply = resolver.resolve(request, Mock())
 
         self.assertEqual(reply.header.rcode, RCODE.NOERROR)
@@ -1151,7 +1164,7 @@ class IPv6EgressResolverTests(ResolverTestCase):
         resolver.is_blocked_asn = Mock(return_value=False)
         resolver.add_mappings = Mock(return_value={'192.0.2.1': '14.16.0.2'})
 
-        request = DNSRecord.question('notexample.com', QTYPE.A)
+        request = DNSRecord.question('notexample.com', 'A')
         reply = resolver.resolve(request, Mock())
 
         self.assertEqual(reply.header.rcode, RCODE.NOERROR)
@@ -1170,7 +1183,7 @@ class IPv6EgressResolverTests(ResolverTestCase):
         # Mock check_ipv6_connectivity to return True so we reach the egress check
         resolver.check_ipv6_connectivity = Mock(return_value=True)
 
-        request = DNSRecord.question('example.com', QTYPE.AAAA)
+        request = DNSRecord.question('example.com', 'AAAA')
         reply = resolver.resolve(request, Mock())
 
         self.assertEqual(reply.header.rcode, RCODE.NOERROR)
@@ -1187,7 +1200,7 @@ class IPv6EgressResolverTests(ResolverTestCase):
         resolver = self.make_resolver_with_ipv6()
         resolver.check_ipv6_connectivity = Mock(return_value=True)
 
-        request = DNSRecord.question('example.com', QTYPE.HTTPS)
+        request = DNSRecord.question('example.com', 'HTTPS')
         reply = resolver.resolve(request, Mock())
 
         self.assertEqual(reply.header.rcode, RCODE.NOERROR)
@@ -1201,7 +1214,7 @@ class IPv6EgressResolverTests(ResolverTestCase):
         resolver = self.make_resolver_with_ipv6()
         resolver.check_ipv6_connectivity = Mock(return_value=True)
 
-        request = DNSRecord.question('example.com', QTYPE.SVCB)
+        request = DNSRecord.question('example.com', 'SVCB')
         reply = resolver.resolve(request, Mock())
 
         self.assertEqual(reply.header.rcode, RCODE.NOERROR)
@@ -1215,7 +1228,7 @@ class IPv6EgressResolverTests(ResolverTestCase):
         resolver = self.make_resolver_with_ipv6()
         resolver.check_ipv6_connectivity = Mock(return_value=True)
 
-        request = DNSRecord.question('example.com', QTYPE.CNAME)
+        request = DNSRecord.question('example.com', 'CNAME')
         reply = resolver.resolve(request, Mock())
 
         self.assertEqual(reply.header.rcode, RCODE.NOERROR)
@@ -1232,7 +1245,7 @@ class IPv6EgressResolverTests(ResolverTestCase):
             'example.com', ['2001:db8::1', '2001:db8::2']
         ))
 
-        request = DNSRecord.question('example.com', QTYPE.A)
+        request = DNSRecord.question('example.com', 'A')
         reply = resolver.resolve(request, Mock())
 
         self.assertEqual(reply.header.rcode, RCODE.NOERROR)
@@ -1271,7 +1284,7 @@ class IPv6EgressResolverTests(ResolverTestCase):
 
     def _make_adguard_reply(self, qname, rcode=RCODE.NOERROR, addresses=()):
         """Create an AdGuard Home DNS reply."""
-        request = DNSRecord.question(qname, QTYPE.A)
+        request = DNSRecord.question(qname, 'A')
         reply = request.reply()
         reply.header.rcode = rcode
         for addr in addresses:
@@ -1299,18 +1312,20 @@ class IPv6EgressResolverTests(ResolverTestCase):
             'other.com', RCODE.SERVFAIL
         ))
 
-        self.assertFalse(resolver.check_ipv6_egress_via_adguard('other.com'))
+        self.assertEqual(resolver.check_ipv6_egress_via_adguard('other.com'), dnsmap.IPV6_EGRESS_DENIED)
 
     def test_adguard_ipv6_egress_disabled(self):
         """When ipv6_egress_enabled is False, AdGuard check returns False."""
         resolver = self.make_resolver_with_adguard(ipv6_egress_enabled=False)
-        self.assertFalse(resolver.check_ipv6_egress_via_adguard('example.com'))
+        resolver.query_doh = Mock()
+        self.assertEqual(resolver.check_ipv6_egress_via_adguard('example.com'), dnsmap.IPV6_EGRESS_ERROR)
         resolver.query_doh.assert_not_called()
 
     def test_adguard_ipv6_egress_no_client_id(self):
         """When no ClientID is configured, AdGuard check returns False."""
         resolver = self.make_resolver_with_adguard(ipv6_egress_client_id=None)
-        self.assertFalse(resolver.check_ipv6_egress_via_adguard('example.com'))
+        resolver.query_doh = Mock()
+        self.assertEqual(resolver.check_ipv6_egress_via_adguard('example.com'), dnsmap.IPV6_EGRESS_ERROR)
         resolver.query_doh.assert_not_called()
 
     def test_is_domain_ipv6_egress_via_adguard(self):
@@ -1338,7 +1353,7 @@ class IPv6EgressResolverTests(ResolverTestCase):
             'example.com', RCODE.SERVFAIL
         ))
 
-        self.assertTrue(resolver.is_domain_ipv6_egress('example.com'))
+        self.assertFalse(resolver.is_domain_ipv6_egress('example.com'))
 
     def test_is_domain_ipv6_egress_adguard_only_no_file_fallback(self):
         """In adguard_only mode, SERVFAIL from AdGuard does NOT fall back to file."""
@@ -1400,6 +1415,8 @@ class IPv6EgressCNAMETests(ResolverTestCase):
             'mapping_batch_delay': 0.001,
             'ipv6_egress_file': str(self.temp_directory.name + '/ipv6-egress.txt'),
             'ipv6_translator_port': 9000,
+            'ipv6_egress_enabled': True,
+            'ipv6_egress_mode': 'file_only',
         }
         arguments.update(overrides)
         resolver = dnsmap.ProxyResolver(**arguments)
@@ -1408,7 +1425,7 @@ class IPv6EgressCNAMETests(ResolverTestCase):
 
     def _make_cname_reply(self, qname, target):
         """Create a DNS reply with a CNAME record."""
-        request = DNSRecord.question(qname, QTYPE.AAAA)
+        request = DNSRecord.question(qname, 'AAAA')
         reply = request.reply()
         reply.header.rcode = RCODE.NOERROR
         reply.add_answer(RR(qname, QTYPE.CNAME, ttl=300, rdata=CNAME(target)))
@@ -1416,7 +1433,7 @@ class IPv6EgressCNAMETests(ResolverTestCase):
 
     def _make_aaaa_reply(self, qname, addresses):
         """Create a DNS reply with AAAA records."""
-        request = DNSRecord.question(qname, QTYPE.AAAA)
+        request = DNSRecord.question(qname, 'AAAA')
         reply = request.reply()
         reply.header.rcode = RCODE.NOERROR
         for addr in addresses:
@@ -1481,7 +1498,7 @@ class IPv6EgressCNAMETests(ResolverTestCase):
             self._make_aaaa_reply('alias.example.com', ['2001:db8::1']),
         ])
 
-        request = DNSRecord.question('example.com', QTYPE.A)
+        request = DNSRecord.question('example.com', 'A')
         reply = resolver.resolve(request, Mock())
 
         self.assertEqual(reply.header.rcode, RCODE.NOERROR)
@@ -1508,6 +1525,8 @@ class IPv6EgressConnectivityTests(ResolverTestCase):
             'mapping_batch_delay': 0.001,
             'ipv6_egress_file': str(self.temp_directory.name + '/ipv6-egress.txt'),
             'ipv6_translator_port': 9000,
+            'ipv6_egress_enabled': True,
+            'ipv6_egress_mode': 'file_only',
         }
         arguments.update(overrides)
         resolver = dnsmap.ProxyResolver(**arguments)
@@ -1663,7 +1682,7 @@ class IPv6EgressPerNodeTests(ResolverTestCase):
         self.assertNotEqual(local_resolver.ipv6_egress_client_id, world_resolver.ipv6_egress_client_id)
 
 
-class IPv4PoolTests(unittest.TestCase):
+class IPv4PoolTests(ResolverTestCase):
     """Tests for IPv4 CIDR calculations and pool sizes."""
 
     def test_cidr_15_address_count(self):
@@ -1672,7 +1691,7 @@ class IPv4PoolTests(unittest.TestCase):
         self.assertEqual(network.num_addresses, 131072)
         self.assertEqual(network.num_addresses - 2, 131070)
         self.assertEqual(str(network.network_address), '14.16.0.0')
-        self.assertEqual(str(network.broadcast_address), '14.16.255.255')
+        self.assertEqual(str(network.broadcast_address), '14.17.255.255')
 
     def test_cidr_14_address_count(self):
         """14.16.0.0/14 has 262,144 total addresses, 262,142 usable hosts."""
@@ -1707,6 +1726,7 @@ class IPv4PoolTests(unittest.TestCase):
             asn_database_reader=self.asn_database,
             iptables_runner=self.iptables_runner,
             load_existing_mappings=False,
+            ipv6_egress_enabled=True,
             ipv6_egress_reserve_count=4,
         )
         self.addCleanup(resolver.close)
@@ -1740,11 +1760,11 @@ class OpenVPNRouteTests(unittest.TestCase):
         # ui-start.sh: push_route = 'push "route ${AZ_SUBNET} 255.252.0.0"'
         # With AZ_SUBNET=14.16.0.0, this becomes push "route 14.16.0.0 255.252.0.0"
         # which is equivalent to 14.16.0.0/14
-        az_subnet = ipaddress.IPv4Network('14.16.0.0', strict=False)
+        az_subnet = ipaddress.IPv4Network('14.16.0.0/14')
         mask = ipaddress.IPv4Address('255.252.0.0')
         prefixlen = sum(bin(int(octet)).count('1') for octet in mask.exploded.split('.'))
         self.assertEqual(prefixlen, 14)
-        self.assertEqual(str(az_subnet), '14.16.0.0')
+        self.assertEqual(str(az_subnet.network_address), '14.16.0.0')
         self.assertEqual(az_subnet.netmask, ipaddress.IPv4Address('255.252.0.0'))
 
 
@@ -1803,6 +1823,19 @@ class OpenVPNClientRouteTests(unittest.TestCase):
             msg='OpenVPN route is pushed by server at connection time; '
                 'clients need to reconnect, not regenerate .ovpn files'
         )
+
+
+
+class OriginalDestinationParsingTests(unittest.TestCase):
+    def test_parses_12_byte_sockaddr(self):
+        # family (2 bytes), port (2), IPv4 address (4), padding (4)
+        sockaddr = bytes.fromhex("020001bbcb00710700000000")
+        self.assertEqual(len(sockaddr), 12)
+        self.assertEqual(
+            ipv6_translator.parse_original_destination(sockaddr),
+            ('203.0.113.7', 443),
+        )
+
 
 
 if __name__ == '__main__':

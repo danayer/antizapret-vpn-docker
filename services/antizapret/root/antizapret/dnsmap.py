@@ -281,7 +281,7 @@ class ProxyResolver(BaseResolver):
 
         try:
             # Query AdGuard Home with the IPv6 egress ClientID
-            a_request = DNSRecord.question(domain, QTYPE.A)
+            a_request = DNSRecord.question(domain, 'A')
             reply = self.query_doh(a_request, self.ipv6_egress_client_id)
 
             if reply.header.rcode == RCODE.NOERROR:
@@ -407,7 +407,7 @@ class ProxyResolver(BaseResolver):
 
             try:
                 # Query AAAA for current domain
-                aaaa_request = DNSRecord.question(current, QTYPE.AAAA)
+                aaaa_request = DNSRecord.question(current, 'AAAA')
                 reply = self.query_doh(aaaa_request, self.resolver_client_id)
 
                 if reply.header.rcode != RCODE.NOERROR:
@@ -490,10 +490,10 @@ class ProxyResolver(BaseResolver):
             ]
 
             if len(new_addresses) > len(self.ipv6_unassigned_addresses):
-                if self.pending_mappings:
-                    return {addr: None for addr in unique}
-                if not self.reset_ipv6_mappings():
-                    return {addr: None for addr in unique}
+                return {
+                    addr: self.ipv6_mappings.get(addr)
+                    for addr in unique
+                }
 
             requests = {}
             is_batch_leader = False
@@ -546,10 +546,11 @@ class ProxyResolver(BaseResolver):
 
             rules = ['*nat']
             rules.extend(
-                '-A {} -d {} -j DNAT --to-destination 127.0.0.1:{}'.format(
-                    self.ipv6_tablename, request.fake_addr, self.ipv6_translator_port
+                '-A {} -p {} -d {} -j DNAT --to-destination 127.0.0.1:{}'.format(
+                    self.ipv6_tablename, protocol, request.fake_addr, self.ipv6_translator_port
                 )
                 for request in batch
+                for protocol in ('tcp', 'udp')
             )
             rules.extend(('COMMIT', ''))
             command = ['iptables-restore', '--wait', '--noflush']
@@ -743,6 +744,8 @@ class ProxyResolver(BaseResolver):
         return addresses
 
     def _reserve_ipv6_addresses(self):
+        if not self.ipv6_egress_enabled:
+            return
         """Reserve a portion of the virtual IPv4 pool exclusively for IPv6 egress.
 
         Reserved addresses are moved from the regular unassigned pool to the
@@ -930,8 +933,6 @@ class ProxyResolver(BaseResolver):
 
     def resolve(self,request,handler):
         try:
-            reply = self.query_doh(request, self.client_id)
-
             qname = str(request.q.qname).rstrip('.')
             qtype = request.q.qtype
 
@@ -955,6 +956,8 @@ class ProxyResolver(BaseResolver):
                     return empty_reply
 
             # --- Standard DNS handling (non-IPv6-egress domains) ---
+
+            reply = self.query_doh(request, self.client_id)
 
             if qtype == QTYPE.AAAA or qtype == QTYPE.HTTPS:
                 print('GOT AAAA or HTTPS')
