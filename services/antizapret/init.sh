@@ -223,7 +223,7 @@ if [ "$CLIENT" = "az-local" ]; then
     IPV6_EGRESS_RESERVE_VAR="IPV6_EGRESS_LOCAL_RESERVE_COUNT"
     IPV6_TRANSLATOR_PORT_VAR="IPV6_TRANSLATOR_LOCAL_PORT"
     IPV6_EGRESS_CLIENT_ID="az-ipv6-local"
-    DEFAULT_IPV6_EGRESS_FILE="/root/antizapret/config/ipv6-egress-domains-local.txt"
+    DEFAULT_IPV6_EGRESS_FILE="/root/antizapret/config/custom/ipv6-egress-domains-local.txt"
     DEFAULT_IPV6_MAPPING_FILE="/root/antizapret/result/ipv6-egress-mappings-local.txt"
 elif [ "$CLIENT" = "az-world" ]; then
     IPV6_EGRESS_ENABLED_VAR="IPV6_EGRESS_WORLD_ENABLED"
@@ -232,7 +232,7 @@ elif [ "$CLIENT" = "az-world" ]; then
     IPV6_EGRESS_RESERVE_VAR="IPV6_EGRESS_WORLD_RESERVE_COUNT"
     IPV6_TRANSLATOR_PORT_VAR="IPV6_TRANSLATOR_WORLD_PORT"
     IPV6_EGRESS_CLIENT_ID="az-ipv6-world"
-    DEFAULT_IPV6_EGRESS_FILE="/root/antizapret/config/ipv6-egress-domains-world.txt"
+    DEFAULT_IPV6_EGRESS_FILE="/root/antizapret/config/custom/ipv6-egress-domains-world.txt"
     DEFAULT_IPV6_MAPPING_FILE="/root/antizapret/result/ipv6-egress-mappings-world.txt"
 else
     IPV6_EGRESS_ENABLED_VAR=""

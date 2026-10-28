@@ -2312,9 +2312,9 @@ class ComposeNetworkTests(unittest.TestCase):
         mounts = [v for v in self.az_local_volumes if 'ipv6-egress-domains-local.txt' in v]
         self.assertTrue(any(
             'config/antizapret/custom/ipv6-egress-domains-local.txt' in v and
-            '/root/antizapret/config/ipv6-egress-domains-local.txt' in v
+            '/root/antizapret/config/custom/ipv6-egress-domains-local.txt' in v
             for v in mounts
-        ), 'expected bind mount config/antizapret/custom/ipv6-egress-domains-local.txt -> /root/antizapret/config/ipv6-egress-domains-local.txt')
+        ), 'expected bind mount config/antizapret/custom/ipv6-egress-domains-local.txt -> /root/antizapret/config/custom/ipv6-egress-domains-local.txt')
 
     def test_mappings_file_reachable_via_result_volume(self):
         self.assertTrue(any(
@@ -2527,6 +2527,242 @@ class IPv6EgressIsolationTests(ResolverTestCase):
         self.assertTrue(resolver.mapping_stopping)
         self.assertFalse(resolver.ipv4_mapping_batch_running)
         self.assertFalse(resolver.ipv6_mapping_batch_running)
+
+
+class IPv6EgressAAAAOnlyTests(ResolverTestCase):
+    """Regression tests for AAAA-only domain support in IPv6 egress.
+
+    Tests that domains with AAAA records but no A records (e.g. ip6only.me)
+    are correctly handled: AdGuard NOERROR without A records authorizes the
+    domain for IPv6 egress, and _resolve_ipv6_egress() finds AAAA records
+    and returns a synthetic virtual IPv4 address.
+    """
+
+    def make_resolver_with_adguard_and_ipv6(self, **overrides):
+        """Create a resolver with AdGuard-based IPv6 egress and mocked connectivity."""
+        arguments = {
+            'address': 'adguard',
+            'port': 53,
+            'doh_port': 3000,
+            'timeout': 1,
+            'iprange': '14.16.0.0/29',
+            'client_id': 'az-local',
+            'resolver_client_id': 'az-resolver',
+            'asn_file': str(self.asn_file),
+            'asn_database': '/unused.mmdb',
+            'asn_database_reader': self.asn_database,
+            'iptables_runner': self.iptables_runner,
+            'load_existing_mappings': False,
+            'mapping_batch_delay': 0.001,
+            'ipv6_egress_client_id': 'az-ipv6-local',
+            'ipv6_egress_enabled': True,
+            'ipv6_translator_port': 9000,
+        }
+        arguments.update(overrides)
+        resolver = dnsmap.ProxyResolver(**arguments)
+        resolver.check_ipv6_connectivity = Mock(return_value=True)
+        self.addCleanup(resolver.close)
+        return resolver
+
+    def _make_adguard_reply(self, qname, rcode=RCODE.NOERROR, addresses=()):
+        """Create an AdGuard Home DNS reply for A queries."""
+        request = DNSRecord.question(qname, 'A')
+        reply = request.reply()
+        reply.header.rcode = rcode
+        for addr in addresses:
+            reply.add_answer(RR(qname, QTYPE.A, ttl=300, rdata=A(addr)))
+        return reply
+
+    def _make_aaaa_reply(self, qname, addresses):
+        """Create a DNS reply with AAAA records."""
+        request = DNSRecord.question(qname, 'AAAA')
+        reply = request.reply()
+        reply.header.rcode = RCODE.NOERROR
+        for addr in addresses:
+            reply.add_answer(RR(qname, QTYPE.AAAA, ttl=300, rdata=AAAA(addr)))
+        return reply
+
+    def _make_cname_reply(self, qname, target):
+        """Create a DNS reply with a CNAME record."""
+        request = DNSRecord.question(qname, 'AAAA')
+        reply = request.reply()
+        reply.header.rcode = RCODE.NOERROR
+        reply.add_answer(RR(qname, QTYPE.CNAME, ttl=300, rdata=CNAME(target)))
+        return reply
+
+    # ------------------------------------------------------------------
+    # Test 1: Allowed domain with A and AAAA - virtual IPv4 as before
+    # ------------------------------------------------------------------
+
+    def test_adguard_a_and_aaaa_returns_virtual_ipv4(self):
+        """Allowed domain with both A and AAAA returns virtual IPv4 (existing behavior)."""
+        resolver = self.make_resolver_with_adguard_and_ipv6()
+        # AdGuard authorizes (NOERROR with A), then AAAA query returns real IPv6
+        resolver.query_doh = Mock(side_effect=[
+            self._make_adguard_reply('example.com', RCODE.NOERROR, ['127.0.0.1']),
+            self._make_aaaa_reply('example.com', ['2001:db8::1']),
+        ])
+
+        request = DNSRecord.question('example.com', 'A')
+        reply = resolver.resolve(request, Mock())
+
+        self.assertEqual(reply.header.rcode, RCODE.NOERROR)
+        self.assertEqual(len(reply.rr), 1)
+        self.assertEqual(reply.rr[0].rtype, QTYPE.A)
+        self.assertEqual(str(reply.rr[0].rdata), '14.16.0.2')
+        # Virtual IPv4, not real IPv6
+        self.assertNotEqual(str(reply.rr[0].rdata), '2001:db8::1')
+
+    # ------------------------------------------------------------------
+    # Test 2: Allowed domain only with AAAA - synthetic A response
+    # ------------------------------------------------------------------
+
+    def test_adguard_aaaa_only_returns_synthetic_a(self):
+        """Allowed domain with AAAA only (NOERROR without A from AdGuard) returns synthetic A."""
+        resolver = self.make_resolver_with_adguard_and_ipv6()
+        # AdGuard returns NOERROR without A records (domain authorized, AAAA-only)
+        # Then AAAA query returns the real IPv6
+        resolver.query_doh = Mock(side_effect=[
+            self._make_adguard_reply('ip6only.me', RCODE.NOERROR),  # NOERROR, no A records
+            self._make_aaaa_reply('ip6only.me', ['2600:1901:0:b2bd::1']),
+        ])
+
+        request = DNSRecord.question('ip6only.me', 'A')
+        reply = resolver.resolve(request, Mock())
+
+        self.assertEqual(reply.header.rcode, RCODE.NOERROR)
+        self.assertEqual(len(reply.rr), 1)
+        self.assertEqual(reply.rr[0].rtype, QTYPE.A)
+        self.assertEqual(str(reply.rr[0].rdata), '14.16.0.2')
+        # No real IPv6 leaked to client
+        self.assertNotEqual(str(reply.rr[0].rdata), '2600:1901:0:b2bd::1')
+
+    # ------------------------------------------------------------------
+    # Test 3: Same domain with SERVFAIL from AdGuard - request denied
+    # ------------------------------------------------------------------
+
+    def test_adguard_servfail_denies_aaaa_only_domain(self):
+        """SERVFAIL from AdGuard denies the domain, AAAA fallback does not bypass ban."""
+        resolver = self.make_resolver_with_adguard_and_ipv6()
+        # AdGuard returns SERVFAIL (catch-all rule matched, domain not authorized)
+        resolver.query_doh = Mock(return_value=self._make_adguard_reply(
+            'ip6only.me', RCODE.SERVFAIL
+        ))
+
+        request = DNSRecord.question('ip6only.me', 'A')
+        reply = resolver.resolve(request, Mock())
+
+        self.assertEqual(reply.header.rcode, RCODE.SERVFAIL)
+        self.assertEqual(len(reply.rr), 0)
+
+    # ------------------------------------------------------------------
+    # Test 4: Real NXDOMAIN - synthetic mapping not created
+    # ------------------------------------------------------------------
+
+    def test_adguard_nxdomain_no_synthetic_mapping(self):
+        """NXDOMAIN from AdGuard does not create a synthetic mapping."""
+        resolver = self.make_resolver_with_adguard_and_ipv6()
+        # AdGuard returns NXDOMAIN (domain does not exist)
+        nxdomain_reply = DNSRecord.question('nonexistent.example', 'A').reply()
+        nxdomain_reply.header.rcode = RCODE.NXDOMAIN
+        resolver.query_doh = Mock(return_value=nxdomain_reply)
+
+        request = DNSRecord.question('nonexistent.example', 'A')
+        reply = resolver.resolve(request, Mock())
+
+        self.assertEqual(reply.header.rcode, RCODE.NXDOMAIN)
+        self.assertEqual(len(reply.rr), 0)
+        # No mapping created
+        self.assertEqual(len(resolver.ipv6_mappings), 0)
+
+    # ------------------------------------------------------------------
+    # Test 5: NOERROR without A and without AAAA - no synthetic mapping
+    # ------------------------------------------------------------------
+
+    def test_adguard_noerror_no_a_no_aaaa_no_mapping(self):
+        """NOERROR without A and without AAAA does not create a synthetic mapping."""
+        resolver = self.make_resolver_with_adguard_and_ipv6()
+        # AdGuard authorizes (NOERROR without A), but AAAA query returns no records
+        empty_aaaa = DNSRecord.question('ip6only.me', 'AAAA').reply()
+        empty_aaaa.header.rcode = RCODE.NOERROR
+        resolver.query_doh = Mock(side_effect=[
+            self._make_adguard_reply('ip6only.me', RCODE.NOERROR),  # NOERROR, no A records
+            empty_aaaa,  # NOERROR, no AAAA records
+        ])
+
+        request = DNSRecord.question('ip6only.me', 'A')
+        reply = resolver.resolve(request, Mock())
+
+        self.assertEqual(reply.header.rcode, RCODE.SERVFAIL)
+        self.assertEqual(len(reply.rr), 0)
+        # No mapping created
+        self.assertEqual(len(resolver.ipv6_mappings), 0)
+
+    # ------------------------------------------------------------------
+    # Test 6: CNAME leading to domain with AAAA
+    # ------------------------------------------------------------------
+
+    def test_adguard_cname_to_aaaa_returns_synthetic_a(self):
+        """CNAME chain leading to AAAA record returns synthetic A address."""
+        resolver = self.make_resolver_with_adguard_and_ipv6()
+        # AdGuard authorizes (NOERROR without A)
+        # CNAME chain: example.com -> alias.example.com -> AAAA 2001:db8::1
+        resolver.query_doh = Mock(side_effect=[
+            self._make_adguard_reply('example.com', RCODE.NOERROR),  # NOERROR, no A records
+            self._make_cname_reply('example.com', 'alias.example.com'),
+            self._make_aaaa_reply('alias.example.com', ['2001:db8::1']),
+        ])
+
+        request = DNSRecord.question('example.com', 'A')
+        reply = resolver.resolve(request, Mock())
+
+        self.assertEqual(reply.header.rcode, RCODE.NOERROR)
+        self.assertEqual(len(reply.rr), 1)
+        self.assertEqual(reply.rr[0].rtype, QTYPE.A)
+        self.assertEqual(str(reply.rr[0].rdata), '14.16.0.2')
+
+    # ------------------------------------------------------------------
+    # Test 7: AAAA/HTTPS/SVCB queries return empty NOERROR (no leak)
+    # ------------------------------------------------------------------
+
+    def test_adguard_aaaa_query_no_leak(self):
+        """AAAA query for authorized AAAA-only domain returns empty NOERROR (no real IPv6 leak)."""
+        resolver = self.make_resolver_with_adguard_and_ipv6()
+        resolver.query_doh = Mock(return_value=self._make_adguard_reply(
+            'ip6only.me', RCODE.NOERROR
+        ))
+
+        request = DNSRecord.question('ip6only.me', 'AAAA')
+        reply = resolver.resolve(request, Mock())
+
+        self.assertEqual(reply.header.rcode, RCODE.NOERROR)
+        self.assertEqual(len(reply.rr), 0)
+
+    def test_adguard_https_query_no_leak(self):
+        """HTTPS query for authorized AAAA-only domain returns empty NOERROR (no leak)."""
+        resolver = self.make_resolver_with_adguard_and_ipv6()
+        resolver.query_doh = Mock(return_value=self._make_adguard_reply(
+            'ip6only.me', RCODE.NOERROR
+        ))
+
+        request = DNSRecord.question('ip6only.me', 'HTTPS')
+        reply = resolver.resolve(request, Mock())
+
+        self.assertEqual(reply.header.rcode, RCODE.NOERROR)
+        self.assertEqual(len(reply.rr), 0)
+
+    def test_adguard_svcb_query_no_leak(self):
+        """SVCB query for authorized AAAA-only domain returns empty NOERROR (no leak)."""
+        resolver = self.make_resolver_with_adguard_and_ipv6()
+        resolver.query_doh = Mock(return_value=self._make_adguard_reply(
+            'ip6only.me', RCODE.NOERROR
+        ))
+
+        request = DNSRecord.question('ip6only.me', 'SVCB')
+        reply = resolver.resolve(request, Mock())
+
+        self.assertEqual(reply.header.rcode, RCODE.NOERROR)
+        self.assertEqual(len(reply.rr), 0)
 
 
 if __name__ == '__main__':

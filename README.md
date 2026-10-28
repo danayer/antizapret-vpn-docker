@@ -458,6 +458,8 @@ cat config/adguard/conf/AdGuardHome.yaml | grep -A5 az-ipv6
 ## Fallback behavior
 
 - If a domain is authorized for IPv6 egress but has no `AAAA` record, DNS returns `SERVFAIL`.
+- If a domain is authorized for IPv6 egress and has `AAAA` records but no `A` record (AAAA-only domain, e.g. `ip6only.me`), `dnsmap` follows the CNAME chain, finds the AAAA records, allocates a virtual IPv4 address, creates NAT rules to the translator, and returns a synthetic `A` response. The real IPv6 address is never exposed to the client.
+- `AAAA`, `HTTPS`, and `SVCB` queries for IPv6 egress domains return empty `NOERROR` — no real IPv6 or CNAME target leaks to the client.
 - If the VPS has no IPv6 route, DNS returns `SERVFAIL` for IPv6 egress domains on that node.
 - Domains not authorized for IPv6 egress continue to work through the normal IPv4 path.
 - The feature is optional: with `IPV6_EGRESS_LOCAL_ENABLED=0` and `IPV6_EGRESS_WORLD_ENABLED=0`,

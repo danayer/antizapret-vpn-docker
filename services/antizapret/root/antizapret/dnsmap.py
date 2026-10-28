@@ -423,16 +423,19 @@ class ProxyResolver(BaseResolver):
                 # Check if there are any answer records (not just SOA/authority)
                 for record in reply.rr:
                     if record.rtype == QTYPE.A:
-                        # Domain matched a specific IPv6 egress rule
+                        # Domain matched a specific IPv6 egress rule with A record
                         print('IPv6 egress: AdGuard authorized {} via ClientID {} (A={})'.format(
                             domain, self.ipv6_egress_client_id, record.rdata
                         ))
                         return IPV6_EGRESS_AUTHORIZED
-                # NOERROR but no A records - not authorized, treat as denied
-                print('IPv6 egress: AdGuard NOERROR without A for {} via ClientID {} - denied'.format(
+                # NOERROR without A records: domain is authorized by AdGuard
+                # (catch-all SERVFAIL did not match) but has no A record -
+                # likely AAAA-only. Proceed to IPv6 egress resolution which
+                # will look up AAAA records via resolve_cname_chain().
+                print('IPv6 egress: AdGuard NOERROR without A for {} via ClientID {} - authorized (AAAA-only possible)'.format(
                     domain, self.ipv6_egress_client_id
                 ))
-                return IPV6_EGRESS_DENIED
+                return IPV6_EGRESS_AUTHORIZED
             elif reply.header.rcode == RCODE.SERVFAIL:
                 # Catch-all SERVFAIL rule matched - domain is explicitly NOT for IPv6 egress
                 print('IPv6 egress: AdGuard SERVFAIL for {} via ClientID {} - explicitly denied'.format(
