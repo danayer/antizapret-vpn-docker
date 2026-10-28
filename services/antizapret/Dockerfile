@@ -61,7 +61,7 @@ RUN mkdir -p /usr/share/GeoIP && \
         https://github.com/P3TERX/GeoLite.mmdb/raw/download/GeoLite2-ASN.mmdb
 
 FROM runtime-base AS test-dnsmap
-WORKDIR /root/antizapret/services/antizapret/root/antizapret
+WORKDIR /root/antizapret
 # Preserve the repository directory structure so that tests using
 # Path(__file__).resolve().parents[4] can locate the repo root and its
 # Compose files. The test file lives at
@@ -81,7 +81,7 @@ RUN <<-"EOT" bash -ex
     apt-get clean
     rm -frv /var/lib/apt/lists/*
 EOT
-RUN python3 -B -m unittest discover -v
+RUN cd /root/antizapret/services/antizapret/root/antizapret && python3 -B -m unittest discover -v
 
 FROM test-dnsmap AS runtime-files
 COPY ./services/antizapret/root /runtime/root
