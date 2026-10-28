@@ -132,7 +132,7 @@ func TestAdaptListIPv6EgressLocalAllowRule(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	requestURL := "/list/?regex=1&allow=1&client=az-ipv6-local&filter_custom=0&filter_dist=0&file=" + url.QueryEscape(listPath) + "&dnsrewrite=127.0.0.1&suffix=1"
+	requestURL := "/list/?allow=1&client=az-ipv6-local&filter_custom=0&filter_dist=0&file=" + url.QueryEscape(listPath) + "&dnsrewrite=127.0.0.1&suffix=1"
 	request := httptest.NewRequest(http.MethodGet, requestURL, nil)
 	response := httptest.NewRecorder()
 
@@ -161,7 +161,7 @@ func TestAdaptListIPv6EgressWorldAllowRule(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	requestURL := "/list/?regex=1&allow=1&client=az-ipv6-world&filter_custom=0&filter_dist=0&file=" + url.QueryEscape(listPath) + "&dnsrewrite=127.0.0.1&suffix=1"
+	requestURL := "/list/?allow=1&client=az-ipv6-world&filter_custom=0&filter_dist=0&file=" + url.QueryEscape(listPath) + "&dnsrewrite=127.0.0.1&suffix=1"
 	request := httptest.NewRequest(http.MethodGet, requestURL, nil)
 	response := httptest.NewRecorder()
 
@@ -196,13 +196,13 @@ func TestAdaptListIPv6EgressLocalAndWorldIndependent(t *testing.T) {
 
 	// Local request
 	localReq := httptest.NewRequest(http.MethodGet,
-		"/list/?regex=1&allow=1&client=az-ipv6-local&filter_custom=0&filter_dist=0&file="+url.QueryEscape(localPath)+"&dnsrewrite=127.0.0.1&suffix=1", nil)
+		"/list/?allow=1&client=az-ipv6-local&filter_custom=0&filter_dist=0&file="+url.QueryEscape(localPath)+"&dnsrewrite=127.0.0.1&suffix=1", nil)
 	localResp := httptest.NewRecorder()
 	adaptList(localResp, localReq)
 
 	// World request
 	worldReq := httptest.NewRequest(http.MethodGet,
-		"/list/?regex=1&allow=1&client=az-ipv6-world&filter_custom=0&filter_dist=0&file="+url.QueryEscape(worldPath)+"&dnsrewrite=127.0.0.1&suffix=1", nil)
+		"/list/?allow=1&client=az-ipv6-world&filter_custom=0&filter_dist=0&file="+url.QueryEscape(worldPath)+"&dnsrewrite=127.0.0.1&suffix=1", nil)
 	worldResp := httptest.NewRecorder()
 	adaptList(worldResp, worldReq)
 
@@ -230,7 +230,7 @@ func TestAdaptListIPv6EgressEmptyFile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	requestURL := "/list/?regex=1&allow=1&client=az-ipv6-local&filter_custom=0&filter_dist=0&file=" + url.QueryEscape(listPath) + "&dnsrewrite=127.0.0.1&suffix=1"
+	requestURL := "/list/?allow=1&client=az-ipv6-local&filter_custom=0&filter_dist=0&file=" + url.QueryEscape(listPath) + "&dnsrewrite=127.0.0.1&suffix=1"
 	request := httptest.NewRequest(http.MethodGet, requestURL, nil)
 	response := httptest.NewRecorder()
 
@@ -248,7 +248,7 @@ func TestAdaptListIPv6EgressFileNotFound(t *testing.T) {
 	root := useListRoot(t)
 	missingPath := filepath.Join(root, "does-not-exist.txt")
 
-	requestURL := "/list/?regex=1&allow=1&client=az-ipv6-local&filter_custom=0&filter_dist=0&file=" + url.QueryEscape(missingPath) + "&dnsrewrite=127.0.0.1&suffix=1"
+	requestURL := "/list/?allow=1&client=az-ipv6-local&filter_custom=0&filter_dist=0&file=" + url.QueryEscape(missingPath) + "&dnsrewrite=127.0.0.1&suffix=1"
 	request := httptest.NewRequest(http.MethodGet, requestURL, nil)
 	response := httptest.NewRecorder()
 
@@ -260,7 +260,7 @@ func TestAdaptListIPv6EgressFileNotFound(t *testing.T) {
 }
 
 func TestAdaptListIPv6EgressInvalidPath(t *testing.T) {
-	requestURL := "/list/?regex=1&allow=1&client=az-ipv6-local&filter_custom=0&filter_dist=0&file=/etc/passwd&dnsrewrite=127.0.0.1&suffix=1"
+	requestURL := "/list/?allow=1&client=az-ipv6-local&filter_custom=0&filter_dist=0&file=/etc/passwd&dnsrewrite=127.0.0.1&suffix=1"
 	request := httptest.NewRequest(http.MethodGet, requestURL, nil)
 	response := httptest.NewRecorder()
 
@@ -278,7 +278,7 @@ func TestAdaptListIPv6EgressCommentsAndBlankLinesIgnored(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	requestURL := "/list/?regex=1&allow=1&client=az-ipv6-local&filter_custom=0&filter_dist=0&file=" + url.QueryEscape(listPath) + "&dnsrewrite=127.0.0.1&suffix=1"
+	requestURL := "/list/?allow=1&client=az-ipv6-local&filter_custom=0&filter_dist=0&file=" + url.QueryEscape(listPath) + "&dnsrewrite=127.0.0.1&suffix=1"
 	request := httptest.NewRequest(http.MethodGet, requestURL, nil)
 	response := httptest.NewRecorder()
 
